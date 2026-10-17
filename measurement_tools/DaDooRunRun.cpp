@@ -15,6 +15,7 @@
 /*                                                                            */
 /* ========================================================================== */
 
+#define _USE_MATH_DEFINES
 #include <iostream>
 #include <vector>
 #include <cmath>
@@ -22,6 +23,8 @@
 #include <fstream>
 #include <numeric>
 #include <algorithm>
+#include <iostream>
+#include <utility>
 #include <random>
 #include <chrono>
 #include <thread>
@@ -376,7 +379,67 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 }
 
 
-// --- Step 4: Window-Constrained Cross Correlation Alignment ---
+#define _USE_MATH_DEFINES
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <iostream>
+#include <utility>
+
+// Fractional delay filter using a Hann-windowed sinc FIR filter
+std::vector<float> fractional_delay_filter(const std::vector<float>& input, float fractional_shift) {
+    size_t size = input.size();
+    std::vector<float> output(size, 0.0f);
+
+    // If shift is extremely close to zero, just return a copy
+    if (std::abs(fractional_shift) < 1e-4f) {
+        return input;
+    }
+
+    const int num_taps = 31; // Must be odd. Higher = better quality, slightly slower.
+    const int half_taps = num_taps / 2;
+
+    for (size_t i = 0; i < size; ++i) {
+        float sum = 0.0f;
+        float weight_sum = 0.0f;
+
+        for (int t = -half_taps; t <= half_taps; ++t) {
+            long long sample_idx = static_cast<long long>(i) - t;
+
+            if (sample_idx >= 0 && sample_idx < static_cast<long long>(size)) {
+                float x = static_cast<float>(t) - fractional_shift;
+
+                // Sinc function: sin(pi * x) / (pi * x)
+                float sinc_val;
+                if (std::abs(x) < 1e-5f) {
+                    sinc_val = 1.0f;
+                } else {
+                    float pi_x = static_cast<float>(M_PI) * x;
+                    sinc_val = std::sin(pi_x) / pi_x;
+                }
+
+                // Hann Window
+                float normalized_n = static_cast<float>(t + half_taps) / static_cast<float>(num_taps - 1);
+                float hann_window = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * normalized_n));
+
+                float coeff = sinc_val * hann_window;
+                sum += input[sample_idx] * coeff;
+                weight_sum += coeff;
+            }
+        }
+
+        // Normalize weights to preserve amplitude near edges
+        if (std::abs(weight_sum) > 1e-5f) {
+            output[i] = sum / weight_sum;
+        } else {
+            output[i] = input[i];
+        }
+    }
+
+    return output;
+}
+
+// Main alignment and averaging function with sub-sample precision
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
     const std::vector<std::vector<float>>& mic_history,
@@ -389,14 +452,14 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     std::vector<std::vector<float>> aligned_ref = {ref_history[0]};
     std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
 
-    // max time lag in milliseconds:
+    // Hardcoded local static value for max time lag in milliseconds
     static constexpr float max_time_ms = 3.0f;
 
-    // Convert time window (milliseconds) to number of samples based on sample rate
+    // Convert time window to number of samples based on sample rate
     int max_lag = static_cast<int>(std::round((max_time_ms / 1000.0f) * sample_rate));
 
     if (num_runs > 1) {
-        std::cout << "\n--- Performing Window-Constrained Cross-Correlation Alignment ---\n";
+        std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment ---\n";
         std::cout << "Max lag window: " << max_time_ms << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
@@ -404,12 +467,14 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         float max_corr = -1e20f;
         int best_lag = 0;
 
-        // Find best lag using normalized cross-correlation
+        int range_size = 2 * max_lag + 1;
+        std::vector<float> corr_scores(range_size, -1e20f);
+
+        // 1. Find best integer lag using normalized cross-correlation
         for (int lag = -max_lag; lag <= max_lag; ++lag) {
             float current_dot = 0.0f;
             float ref0_energy = 0.0f;
             float ref_i_energy = 0.0f;
-            int count = 0;
 
             for (size_t n = 0; n < signal_size; ++n) {
                 long long ref_idx = static_cast<long long>(n) + lag;
@@ -419,12 +484,13 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
                     current_dot += val0 * vali;
                     ref0_energy += val0 * val0;
                     ref_i_energy += vali * vali;
-                    count++;
                 }
             }
 
             float denominator = std::sqrt(ref0_energy * ref_i_energy);
             float ncc = (denominator > 1e-5f) ? (current_dot / denominator) : 0.0f;
+
+            corr_scores[lag + max_lag] = ncc;
 
             if (ncc > max_corr) {
                 max_corr = ncc;
@@ -432,29 +498,33 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        std::cout << " Run " << i + 1 << " timing jitter: " << best_lag << " samples\n";
+        // 2. Refine lag to sub-sample precision using Parabolic Interpolation
+        float refined_lag = static_cast<float>(best_lag);
+        int best_idx = best_lag + max_lag;
 
-        std::vector<float> shifted_ref(signal_size, 0.0f);
-        std::vector<float> shifted_mic(signal_size, 0.0f);
+        if (best_lag > -max_lag && best_lag < max_lag) {
+            float y_minus = corr_scores[best_idx - 1];
+            float y_zero  = corr_scores[best_idx];
+            float y_plus  = corr_scores[best_idx + 1];
 
-        // Corrected shift direction
-        if (best_lag > 0) {
-            std::copy(ref_history[i].begin() + best_lag, ref_history[i].end(), shifted_ref.begin());
-            std::copy(mic_history[i].begin() + best_lag, mic_history[i].end(), shifted_mic.begin());
-        } else if (best_lag < 0) {
-            int abs_lag = std::abs(best_lag);
-            std::copy(ref_history[i].begin(), ref_history[i].end() - abs_lag, shifted_ref.begin() + abs_lag);
-            std::copy(mic_history[i].begin(), mic_history[i].end() - abs_lag, shifted_mic.begin() + abs_lag);
-        } else {
-            shifted_ref = ref_history[i];
-            shifted_mic = mic_history[i];
+            float denominator = (y_minus - 2.0f * y_zero + y_plus);
+            if (std::abs(denominator) > 1e-5f) {
+                float delta = 0.5f * (y_minus - y_plus) / denominator;
+                refined_lag += delta;
+            }
         }
+
+        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples\n";
+
+        // 3. Shift both reference and microphone signals using the fractional delay filter
+        std::vector<float> shifted_ref = fractional_delay_filter(ref_history[i], refined_lag);
+        std::vector<float> shifted_mic = fractional_delay_filter(mic_history[i], refined_lag);
 
         aligned_ref.push_back(shifted_ref);
         aligned_mic.push_back(shifted_mic);
     }
 
-    // Compute average across runs
+    // 4. Compute average across all runs
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
