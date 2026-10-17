@@ -504,7 +504,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     int warm_up_samples = args.warm_up_delay * args.sample_rate;
     std::vector<float> warm_up_buffer(warm_up_samples * pa_out_channels, 0.0f);
     
-    std::cout << "Warming up output device for 3 seconds...\n";
+    std::cout << "Warming up the output device for " << args.warm_up_delay << " seconds with silence...\n";
     PaError write_err = Pa_WriteStream(stream, warm_up_buffer.data(), warm_up_samples);
     if (write_err != paNoError) {
         std::cerr << "PortAudio Error during warm-up write: " << Pa_GetErrorText(write_err) << "\n";

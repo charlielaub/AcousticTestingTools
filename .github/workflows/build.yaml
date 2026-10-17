@@ -30,7 +30,7 @@ jobs:
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          vcpkg install portaudio:x64-windows eigen3:x64-windows
+          vcpkg install portaudio:x64-windows-static eigen3:x64-windows-static
 
       - name: Configure CMake (Ubuntu)
         if: matrix.os == 'ubuntu-24.04'
@@ -38,7 +38,7 @@ jobs:
 
       - name: Configure CMake (Windows)
         if: matrix.os == 'windows-latest'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
       - name: Build Project
         run: cmake --build build --config Release
