@@ -42,7 +42,7 @@ struct AppArgs {
     float chirp_rate = 2.0f;
     float start_freq = 1.0f;
     int repetitions = 1;
-    float warm_up_delay = 3.0f
+    float warm_up_delay = 3.0f;
     float mean_wait = 3.0f;
     float level = -6.0f; // Default level in dB (must be <= 0.0)
     int api_idx = -1;
@@ -72,8 +72,8 @@ void show_help_info(const char* prog_name) {
               << "  --input_channels <id1> <id2>    Two physical input channel indices\n"
               << "  --help, -h                      Display this help message and exit\n\n"
               << "NOTES:\n"
-              << "    The command line parameters may be provided in any order.\n";
-              << "    The first input channel records the stimulus signal.\n";
+              << "    The command line parameters may be provided in any order.\n"
+              << "    The first input channel records the stimulus signal.\n"
               << "    The second input channel records the microphone signal.\n\n";
 }
 
