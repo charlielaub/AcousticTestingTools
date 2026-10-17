@@ -25,15 +25,20 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential pkg-config libportaudio2 portaudio19-dev
+          sudo apt-get install -y cmake build-essential pkg-config libportaudio2 portaudio19-dev libeigen3-dev
 
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          choco install portaudio
+          vcpkg install portaudio:x64-windows eigen3:x64-windows
 
-      - name: Configure CMake
+      - name: Configure CMake (Ubuntu)
+        if: matrix.os == 'ubuntu-24.04'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure CMake (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
 
       - name: Build Project
         run: cmake --build build --config Release
@@ -42,7 +47,6 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          # Ensure release artifacts match expected names
           if (Test-Path "build/Release/DaDooRunRun.exe") {
               Copy-Item "build/Release/DaDooRunRun.exe" "build/DaDooRunRun.exe"
           }
