@@ -3,7 +3,9 @@ name: Build and Release Audio Tools
 on:
   push:
     tags:
-      - 'v*' # Triggers automatically when you push a tag starting with 'v' (e.g., v1.0.0)
+      - 'v*'
+  release:
+    types: [published]
 
 jobs:
   build:
@@ -23,7 +25,7 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential libportaudio2 portaudio19-dev
+          sudo apt-get install -y cmake build-essential pkg-config libportaudio2 portaudio19-dev
 
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
@@ -36,17 +38,24 @@ jobs:
       - name: Build Project
         run: cmake --build build --config Release
 
-      - name: Rename Binaries for Clarity
+      - name: Prepare Windows Binaries
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          Move-Item build/Release/DaDooRunRun.exe build/DaDooRunRun-Windows.exe
-          Move-Item build/Release/ProbeAudioDevs.exe build/ProbeAudioDevs-Windows.exe
+          # Ensure release artifacts match expected names
+          if (Test-Path "build/Release/DaDooRunRun.exe") {
+              Copy-Item "build/Release/DaDooRunRun.exe" "build/DaDooRunRun.exe"
+          }
+          if (Test-Path "build/Release/ProbeAudioDevs.exe") {
+              Copy-Item "build/Release/ProbeAudioDevs.exe" "build/ProbeAudioDevs.exe"
+          }
 
       - name: Upload Binaries to Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
+            build/DaDooRunRun.exe
+            build/ProbeAudioDevs.exe
             build/Release/DaDooRunRun.exe
             build/Release/ProbeAudioDevs.exe
             build/DaDooRunRun
