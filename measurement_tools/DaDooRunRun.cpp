@@ -275,57 +275,68 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
  
 
-    // --- Dynamic Design of a Stable 4th-Order Highpass Butterworth Filter ---
+// --- Dynamic Design of a Stable 4th-Order Highpass Bessel Filter ---
     // The corner frequency is 4 times the start frequency
     double corner_freq = 4.0 * static_cast<double>(start_freq); // 4.0 Hz
     double fs = static_cast<double>(sample_rate);
 
-    // 1. Correct Pre-warped analog angular frequency
+    // 1. Correct Pre-warped analog angular frequency for the cutoff
     double absolute_w0 = 2.0 * fs * std::tan(M_PI * corner_freq / fs); 
 
     Eigen::MatrixXd sos(2, 6);
-    // Butterworth pole angles for a 4th-order filter
-    double angles[2] = { 0.3826834323650897, 0.9238795325112867 }; 
+
+    // 4th-order Bessel normalized lowpass prototype parameters (Stage 0 and Stage 1).
+    // Using standard coefficients for the two biquad stages (Q and frequency scaling factors):
+    // Stage 1: Q1 = 0.805538, frequency multiplier = 1.603358
+    // Stage 2: Q2 = 0.521935, frequency multiplier = 1.430172
+    // (Values derived from standard analog filter tables / miniDSP / analog design references)
+    double q[2]       = { 0.80553828, 0.52193458 };
+    double freq_mult[2] = { 1.60335752, 1.43017156 };
 
     for (int s = 0; s < 2; ++s) {
-        double alpha = absolute_w0 * angles[s];
-        double w0_sq = absolute_w0 * absolute_w0;
+        // Scale the pre-warped omega for each stage's specific pole pair
+        double stage_w0 = absolute_w0 * freq_mult[s];
+        double stage_w0_sq = stage_w0 * stage_w0;
         double fs2 = 2.0 * fs;
         double fs2_sq = fs2 * fs2;
+        
+        // Parameter alpha for bilinear transform of a highpass biquad
+        // Denominator coefficients in analog domain: s^2 + (w0/Q)s + w0^2
+        double alpha_bessel = stage_w0 / q[s];
 
-        // Standard bilinear transform equations using pre-warped w0
-        double a0 = fs2_sq + 2.0 * alpha * fs2 + w0_sq;
-        double a1 = 2.0 * w0_sq - 2.0 * fs2_sq;
-        double a2 = fs2_sq - 2.0 * alpha * fs2 + w0_sq;
+        // Bilinear transform equations for Highpass Filter
+        double a0 = fs2_sq + alpha_bessel * fs2 + stage_w0_sq;
+        double a1 = 2.0 * stage_w0_sq - 2.0 * fs2_sq;
+        double a2 = fs2_sq - alpha_bessel * fs2 + stage_w0_sq;
 
+        // Highpass zeros at DC (z = 1)
         double b0 = fs2_sq;
         double b1 = -2.0 * fs2_sq;
         double b2 = fs2_sq;
 
         sos(s, 0) = b0 / a0; sos(s, 1) = b1 / a0; sos(s, 2) = b2 / a0;
-        sos(s, 3) = 1.0;    sos(s, 4) = a1 / a0; sos(s, 5) = a2 / a0;
+        sos(s, 3) = 1.0;     sos(s, 4) = a1 / a0; sos(s, 5) = a2 / a0;
     }
 
     // --- Apply the calculated SOS filter using 64-bit State Registers ---
-    // Initialize a double-precision working vector from the input stimulus
     std::vector<double> filtered(stimulus.begin(), stimulus.end());
 
     // Process all SOS stages entirely in double precision
     for (int s = 0; s < 2; ++s) {
         double b0 = sos(s, 0), b1 = sos(s, 1), b2 = sos(s, 2);
-        double a1 = sos(s, 4), a2 = sos(s, 5); // Assuming a0 is normalized to 1.0
+        double a1 = sos(s, 4), a2 = sos(s, 5); 
         
         double x1 = 0.0, x2 = 0.0; 
         double y1 = 0.0, y2 = 0.0;
 
         for (size_t i = 0; i < filtered.size(); ++i) {
-            double x0 = filtered[i]; // Read double value directly
+            double x0 = filtered[i]; 
             double y0 = (b0 * x0) + (b1 * x1) + (b2 * x2) - (a1 * y1) - (a2 * y2);
             
             x2 = x1; x1 = x0;
             y2 = y1; y1 = y0;
             
-            filtered[i] = y0; // Store intermediate double result without casting
+            filtered[i] = y0; 
         }
     }
 
