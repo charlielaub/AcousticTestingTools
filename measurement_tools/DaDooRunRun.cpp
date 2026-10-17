@@ -231,7 +231,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         float t = static_cast<float>(i) / sample_rate;
         stimulus[i] = std::sin(2.0f * M_PI * start_freq * duration / std::log(end_freq / start_freq) * (std::pow(end_freq / start_freq, t / duration) - 1.0f));
     }
-/*
+/* 
     // 2. Apply Tapers (Half-Hann windows)
     int start_length = static_cast<int>(sample_rate * (duration * (0.3f / total_decades)));
     int end_length = static_cast<int>(sample_rate * (duration * (0.15f / total_decades)));
