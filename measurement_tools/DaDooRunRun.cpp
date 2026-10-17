@@ -33,6 +33,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+
 // Struct to handle parsed arguments
 struct AppArgs {
     std::string mic_output_file = "mic_data.wav";
@@ -41,6 +42,7 @@ struct AppArgs {
     float chirp_rate = 2.0f;
     float start_freq = 1.0f;
     int repetitions = 1;
+    float warm_up_delay = 3.0f
     float mean_wait = 3.0f;
     float level = -6.0f; // Default level in dB (must be <= 0.0)
     int api_idx = -1;
@@ -48,6 +50,7 @@ struct AppArgs {
     int out_channels[2] = {-1, -1};
     int in_channels[2] = {-1, -1};
 };
+
 
 // --- Helper: Display Usage / Help Information ---
 void show_help_info(const char* prog_name) {
@@ -61,14 +64,19 @@ void show_help_info(const char* prog_name) {
               << "  --chirp_rate <float>            Chirp rate in seconds per decade of frequency (default: 2.0)\n"
               << "  --start_freq <float>            Start frequency in Hz (default: 1.0)\n"
               << "  --repetitions <int>             Number of measurement runs (default: 1)\n"
+              << "  --warm_up_delay <float>         Length of DAC warm-up delay in seconds (default: 3.0)\n"
               << "  --mean_wait <float>             Average pause between runs in seconds (default: 3.0)\n"
               << "  --api_idx <int>                 PortAudio host API index\n"
               << "  --device_idx <int>              PortAudio hardware device index\n"
               << "  --output_channels <id1> <id2>   Two physical output channel indices\n"
               << "  --input_channels <id1> <id2>    Two physical input channel indices\n"
               << "  --help, -h                      Display this help message and exit\n\n"
-              << "NOTE: the command line parameters may be provided in any order.";
+              << "NOTES:\n"
+              << "    The command line parameters may be provided in any order.\n";
+              << "    The first input channel records the stimulus signal.\n";
+              << "    The second input channel records the microphone signal.\n\n";
 }
+
 
 // --- Helper: Manual Command Line Parsing ---
 AppArgs parse_arguments(int argc, char* argv[]) {
@@ -85,6 +93,7 @@ AppArgs parse_arguments(int argc, char* argv[]) {
         else if (arg == "--chirp_rate" && i + 1 < argc) args.chirp_rate = std::stof(argv[++i]);
         else if (arg == "--start_freq" && i + 1 < argc) args.start_freq = std::stof(argv[++i]);
         else if (arg == "--repetitions" && i + 1 < argc) args.repetitions = std::stoi(argv[++i]);
+        else if (arg == "--warm_up_delay" && i + 1 < argc) args.warm_up_delay = std::stoi(argv[++i]);
         else if (arg == "--mean_wait" && i + 1 < argc) args.mean_wait = std::stof(argv[++i]);
         else if (arg == "--level" && i + 1 < argc) {
             float parsed_level = std::stof(argv[++i]);
@@ -108,6 +117,7 @@ AppArgs parse_arguments(int argc, char* argv[]) {
     }
     return args;
 }
+
 
 // --- Helper: Write 32-bit Float Mono WAV File ---
 void write_float32_wav(const std::string& filename, const std::vector<float>& data, int sample_rate) {
@@ -154,6 +164,7 @@ void write_float32_wav(const std::string& filename, const std::vector<float>& da
 
     std::cout << " Saved: " << full_name << " (Format: Mono, 32-bit Float)" << std::endl;
 }
+
 
 // --- Step 1 & 2: Hardware Device Management ---
 bool select_host_api_and_device(AppArgs& args) {
@@ -208,14 +219,15 @@ bool select_host_api_and_device(AppArgs& args) {
 
     if (args.in_channels[0] == -1) {
         std::cout << "\n--- [Step 4] Configure Input Channels (Available: 0 to " << selected_dev->maxInputChannels - 1 << ") ---\n";
-        std::cout << "Enter physical input channel index for Reference Loopback: ";
+        std::cout << "Enter physical input channel index that will record the Stimulus signal: ";
         std::cin >> args.in_channels[0];
-        std::cout << "Enter physical input channel index for Microphone: ";
+        std::cout << "Enter physical input channel index that will record the Microphone signal: ";
         std::cin >> args.in_channels[1];
     }
 
     return true;
 }
+
 
 // --- Step 3: Math and Stimulus Generation (with padding, filtering, gain, and clipping) ---
 std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float level_dB) {
@@ -273,11 +285,10 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     // 3. Add 0.5sec of zero padding at the end
     int end_pad_samples = static_cast<int>(sample_rate * 0.5f);
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
- 
 
 // --- Dynamic Design of a Stable 4th-Order Highpass Bessel Filter ---
     // The corner frequency is 4 times the start frequency
-    double corner_freq = 4.0 * static_cast<double>(start_freq); // 4.0 Hz
+    double corner_freq = 4.0 * static_cast<double>(start_freq);
     double fs = static_cast<double>(sample_rate);
 
     // 1. Correct Pre-warped analog angular frequency for the cutoff
@@ -364,6 +375,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     return final_output;
 }
 
+
 // --- Step 4: Window-Constrained Cross Correlation Alignment ---
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
@@ -377,7 +389,9 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     int max_lag = 500; 
 
-    std::cout << "\n--- Performing Window-Constrained Cross-Correlation Alignment ---\n";
+    if ( num_runs > 1 ) {
+        std::cout << "\n--- Performing Window-Constrained Cross-Correlation Alignment ---\n";
+    }
     for (size_t i = 1; i < num_runs; ++i) {
         float max_corr = -1e20f;
         int best_lag = 0;
@@ -396,7 +410,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        std::cout << " Run " << i + 1 << " timing lag relative to baseline: " << best_lag << " samples\n";
+        std::cout << " Run " << i + 1 << " timing jitter: " << best_lag << " samples\n";
 
         std::vector<float> shifted_ref(signal_size, 0.0f);
         std::vector<float> shifted_mic(signal_size, 0.0f);
@@ -430,6 +444,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     return {avg_ref, avg_mic};
 }
+
 
 // --- Step 5: Full-Duplex Audio Run Execution (Stream Stays Open Across Repetitions) ---
 std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(AppArgs& args, const std::vector<float>& stimulus) {
@@ -483,10 +498,10 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
 
     Pa_StartStream(stream);
 
-    // --- 3-SECOND WARM-UP PERIOD ---
-    // Calculate samples for 3 seconds of silence and stream zeros to wake up 
-    //    the output device before performing the measurement repetitions
-    int warm_up_samples = 3 * args.sample_rate;
+    // --- DAC WARM-UP PERIOD ---
+    // Streams silence/zeros to wake up DAC and allow the data acqusition 
+    // settings to initialize before performing the measurement repetitions
+    int warm_up_samples = args.warm_up_delay * args.sample_rate;
     std::vector<float> warm_up_buffer(warm_up_samples * pa_out_channels, 0.0f);
     
     std::cout << "Warming up output device for 3 seconds...\n";
@@ -543,6 +558,8 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
 
     return align_and_average(ref_history, mic_history);
 }
+
+
 
 
 int main(int argc, char* argv[]) {
