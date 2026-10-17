@@ -585,7 +585,6 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
 
 
 
-
 int main(int argc, char* argv[]) {
     // Show usage/help info automatically if no arguments are provided
     if (argc == 1) {
