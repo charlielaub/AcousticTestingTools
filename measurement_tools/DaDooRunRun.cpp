@@ -219,36 +219,43 @@ bool select_host_api_and_device(AppArgs& args) {
 
 // --- Step 3: Math and Stimulus Generation (with padding, filtering, gain, and clipping) ---
 std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float level_dB) {
-    float nyquist = 0.5f * static_cast<float>(sample_rate);
-    float end_freq = 0.99f * nyquist; // End at 99% of Nyquist frequency
+    // Promote core calculation variables to double precision
+    double d_sample_rate = static_cast<double>(sample_rate);
+    double d_start_freq  = static_cast<double>(start_freq);
+    double d_chirp_rate  = static_cast<double>(chirp_rate);
+    double d_level_dB    = static_cast<double>(level_dB);
 
-    // Basic input validation to prevent runtime crashes or division by zero
-    if (start_freq <= 0.0f || end_freq <= start_freq || chirp_rate <= 0.0f || sample_rate <= 0) {
+    double nyquist = 0.5 * d_sample_rate;
+    double end_freq = 0.99 * nyquist; // End at 99% of Nyquist frequency
+
+    // Basic input validation
+    if (d_start_freq <= 0.0 || end_freq <= d_start_freq || d_chirp_rate <= 0.0 || sample_rate <= 0) {
         throw std::invalid_argument("Invalid parameters for chirp generation.");
     }
 
-    float total_decades = std::log10(end_freq / start_freq);
-    float duration = chirp_rate * total_decades;
-    int num_samples = static_cast<int>(static_cast<float>(sample_rate) * duration);
+    double total_decades = std::log10(end_freq / d_start_freq);
+    double duration = d_chirp_rate * total_decades;
+    int num_samples = static_cast<int>(d_sample_rate * duration);
 
     std::vector<float> stimulus(num_samples);
 
-    // Convert decibels to a linear amplitude multiplier
-    float amplitude = std::pow(10.0f, level_dB / 20.0f);
+    // Convert decibels to a linear amplitude multiplier in double precision
+    double amplitude = std::pow(10.0, d_level_dB / 20.0);
 
-    // Precompute constant terms outside the loop for efficiency
-    const float ln_ratio = std::log(end_freq / start_freq);
-    const float phase_factor = start_freq * duration / ln_ratio;
-    const float ratio = end_freq / start_freq;
-    const float two_pi = 2.0f * static_cast<float>(M_PI);
+    // Precompute constant terms in double precision outside the loop
+    const double ln_ratio = std::log(end_freq / d_start_freq);
+    const double phase_factor = d_start_freq * duration / ln_ratio;
+    const double ratio = end_freq / d_start_freq;
+    const double two_pi = 2.0 * M_PI;
 
-    // 1. Generate Logarithmic Chirp with Amplitude Scaling
+    // 1. Generate Logarithmic Chirp in Double Precision & Cast to Float
     for (int i = 0; i < num_samples; ++i) {
-        float t = static_cast<float>(i) / static_cast<float>(sample_rate);
-        float phase = two_pi * phase_factor * (std::pow(ratio, t / duration) - 1.0f);
-        stimulus[i] = amplitude * std::sin(phase);
+        double t = static_cast<double>(i) / d_sample_rate;
+        double phase = two_pi * phase_factor * (std::pow(ratio, t / duration) - 1.0);
+        
+        // Cast the high-precision double result down to float upon storage
+        stimulus[i] = static_cast<float>(amplitude * std::sin(phase));
     }
-
  
     // 2. Apply Tapers (Half-Hann windows)
     int start_length = static_cast<int>(sample_rate * (duration * (0.3f / total_decades)));
@@ -423,6 +430,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     for (int i = 0; i < total_samples; ++i) {
         int frame_offset = i * pa_out_channels;
         output_buffer[frame_offset + args.out_channels[0]] = stimulus[i];
+        output_buffer[frame_offset + args.out_channels[1]] = stimulus[i];
     }
 
     std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples));
