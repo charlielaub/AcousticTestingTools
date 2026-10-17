@@ -1,5 +1,5 @@
 # AcousticTestingTools
-A suite of programs to perform and post-process loudspeaker measurements. 
+A suite of programs to collect and post-process loudspeaker measurements. 
 
 The repository consists of multiple programs in two directories:
 
