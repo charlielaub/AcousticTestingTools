@@ -253,12 +253,15 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
 
     // --- Dynamic Design of a Stable 4th-Order Highpass Butterworth Filter ---
-    double corner_freq = 4.0 * static_cast<double>(start_freq);
+    // The corner frequency is 4 times the start frequency
+    double corner_freq = 4.0 * static_cast<double>(start_freq); // 4.0 Hz
     double fs = static_cast<double>(sample_rate);
 
-    double absolute_w0 = 2.0 * fs * (M_PI * corner_freq / fs); 
-    
+    // 1. Correct Pre-warped analog angular frequency
+    double absolute_w0 = 2.0 * fs * std::tan(M_PI * corner_freq / fs); 
+
     Eigen::MatrixXd sos(2, 6);
+    // Butterworth pole angles for a 4th-order filter
     double angles[2] = { 0.3826834323650897, 0.9238795325112867 }; 
 
     for (int s = 0; s < 2; ++s) {
@@ -267,6 +270,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         double fs2 = 2.0 * fs;
         double fs2_sq = fs2 * fs2;
 
+        // Standard bilinear transform equations using pre-warped w0
         double a0 = fs2_sq + 2.0 * alpha * fs2 + w0_sq;
         double a1 = 2.0 * w0_sq - 2.0 * fs2_sq;
         double a2 = fs2_sq - 2.0 * alpha * fs2 + w0_sq;
