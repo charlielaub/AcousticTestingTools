@@ -22,4 +22,4 @@ This folder contains the source code for several Python programs that are use to
 
 **Installation Instructions for the post-processing tools**  
 ------------------------------------------------------------------------------------------------------
-The python code for all of the data post-processing programs remains uncompiled. Instead you run then by invoking python plus the program name from within a terminal on your system. Installing Python, including the required modules, is easy. Installation instructions for both Windows and Ubuntu Linux are provided in the docs folder.  
+The python code for all of the data post-processing programs remains uncompiled. These programs are executed by invoking python and supplying the program name plus any command-line parameters from within a terminal on your system. Installing Python, including the required modules, is easy. Installation instructions for both Windows and Ubuntu Linux are provided in the docs folder.  
