@@ -252,7 +252,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     stimulus.insert(stimulus.begin(), start_pad_samples, 0.0f);
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
 
-/*
+
     // --- Dynamic Design of a Stable 4th-Order Highpass Butterworth Filter ---
     // The corner frequency is 4 times the start frequency
     double corner_freq = 4.0 * static_cast<double>(start_freq); // 4.0 Hz
@@ -286,7 +286,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
     // --- Apply the calculated SOS filter using 64-bit State Registers ---
     std::vector<float> filtered = stimulus; 
-    
+/*    
     for (int s = 0; s < 2; ++s) {
         double b0 = sos(s, 0), b1 = sos(s, 1), b2 = sos(s, 2);
         double a1 = sos(s, 4), a2 = sos(s, 5);
@@ -303,17 +303,17 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
             
             filtered[i] = static_cast<float>(y0);
         }
-    } */
-
+    } 
+*/
     // --- Apply Decibel Level Scaling ---
     float voltage_gain = static_cast<float>(std::pow(10.0, level_dB / 20.0));
-    for (float& sample : stimulus) {
+    for (float& sample : filtered) {
         sample *= voltage_gain;
     }
 
     // --- Hard clip individual samples that exceed +/- 1.0 (0 dBFS) ---
     int clipped_count = 0;
-    for (float& sample : stimulus) {
+    for (float& sample : filtered) {
         if (sample > 1.0f) {
             sample = 1.0f;
             clipped_count++;
@@ -327,7 +327,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         std::cout << "Warning: " << clipped_count << " samples exceeded +/- 1.0 and were clipped.\n";
     }
 
-    return stimulus;
+    return filtered;
 }
 
 // --- Step 4: Window-Constrained Cross Correlation Alignment ---
