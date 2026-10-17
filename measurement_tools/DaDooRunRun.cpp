@@ -307,26 +307,34 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     }
 
     // --- Apply the calculated SOS filter using 64-bit State Registers ---
-    std::vector<float> filtered = stimulus; 
-/*    
+    // Initialize a double-precision working vector from the input stimulus
+    std::vector<double> filtered(stimulus.begin(), stimulus.end());
+
+    // Process all SOS stages entirely in double precision
     for (int s = 0; s < 2; ++s) {
         double b0 = sos(s, 0), b1 = sos(s, 1), b2 = sos(s, 2);
-        double a1 = sos(s, 4), a2 = sos(s, 5);
+        double a1 = sos(s, 4), a2 = sos(s, 5); // Assuming a0 is normalized to 1.0
         
         double x1 = 0.0, x2 = 0.0; 
         double y1 = 0.0, y2 = 0.0;
 
         for (size_t i = 0; i < filtered.size(); ++i) {
-            double x0 = static_cast<double>(filtered[i]);
+            double x0 = filtered[i]; // Read double value directly
             double y0 = (b0 * x0) + (b1 * x1) + (b2 * x2) - (a1 * y1) - (a2 * y2);
             
             x2 = x1; x1 = x0;
             y2 = y1; y1 = y0;
             
-            filtered[i] = static_cast<float>(y0);
+            filtered[i] = y0; // Store intermediate double result without casting
         }
-    } 
-*/
+    }
+
+    // Convert the final double vector back to float in a separate step
+    std::vector<float> final_output(filtered.size());
+    for (size_t i = 0; i < filtered.size(); ++i) {
+        final_output[i] = static_cast<float>(filtered[i]);
+    }
+
     // --- Hard clip individual samples that exceed +/- 1.0 (0 dBFS) ---
     int clipped_count = 0;
     for (float& sample : filtered) {
