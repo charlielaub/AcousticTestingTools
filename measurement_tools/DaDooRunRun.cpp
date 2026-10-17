@@ -425,13 +425,13 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     inputParameters.device = args.device_idx;
     inputParameters.channelCount = pa_in_channels;
     inputParameters.sampleFormat = paFloat32;
-    inputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->suggestedLowInputLatency;
+    inputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->defaultLowInputLatency;
     inputParameters.hostApiSpecificStreamInfo = nullptr;
 
     outputParameters.device = args.device_idx;
     outputParameters.channelCount = pa_out_channels;
     outputParameters.sampleFormat = paFloat32;
-    outputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->suggestedLowOutputLatency;
+    outputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->defaultLowOutputLatency;
     outputParameters.hostApiSpecificStreamInfo = nullptr;
 
     PaStream* stream;

@@ -86,13 +86,13 @@ int main() {
             in_params.device = i;
             in_params.channelCount = dev_info->maxInputChannels;
             in_params.sampleFormat = paFloat32;
-            in_params.suggestedLatency = dev_info->suggestedLowInputLatency;
+            in_params.suggestedLatency = dev_info->defaultLowInputLatency;
             in_params.hostApiSpecificStreamInfo = nullptr;
 
             out_params.device = i;
             out_params.channelCount = dev_info->maxOutputChannels;
             out_params.sampleFormat = paFloat32;
-            out_params.suggestedLatency = dev_info->suggestedLowOutputLatency;
+            out_params.suggestedLatency = dev_info->defaultLowOutputLatency;
             out_params.hostApiSpecificStreamInfo = nullptr;
 
             // Check if full capability configuration works
