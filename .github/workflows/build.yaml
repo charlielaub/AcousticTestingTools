@@ -43,26 +43,28 @@ jobs:
       - name: Build Project
         run: cmake --build build --config Release
 
-      - name: Prepare Windows Binaries
+      # --- Rename and Package Windows Binaries ---
+      - name: Prepare Windows Artifacts
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          if (Test-Path "build/Release/DaDooRunRun.exe") {
-              Copy-Item "build/Release/DaDooRunRun.exe" "build/DaDooRunRun.exe"
-          }
-          if (Test-Path "build/Release/ProbeAudioDevs.exe") {
-              Copy-Item "build/Release/ProbeAudioDevs.exe" "build/ProbeAudioDevs.exe"
-          }
+          New-Item -ItemType Directory -Force -Path "dist"
+          Copy-Item "build/Release/DaDooRunRun.exe" "dist/DaDooRunRun-Windows.exe"
+          Copy-Item "build/Release/ProbeAudioDevs.exe" "dist/ProbeAudioDevs-Windows.exe"
 
+      # --- Rename and Package Linux Binaries ---
+      - name: Prepare Linux Artifacts
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          mkdir -p dist
+          cp build/DaDooRunRun dist/DaDooRunRun-Linux
+          cp build/ProbeAudioDevs dist/ProbeAudioDevs-Linux
+
+      # --- Upload Only Platform-Specific Assets ---
       - name: Upload Binaries to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/DaDooRunRun.exe
-            build/ProbeAudioDevs.exe
-            build/Release/DaDooRunRun.exe
-            build/Release/ProbeAudioDevs.exe
-            build/DaDooRunRun
-            build/ProbeAudioDevs
+            dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
