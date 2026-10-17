@@ -251,7 +251,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     
     stimulus.insert(stimulus.begin(), start_pad_samples, 0.0f);
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
-
+ 
 
     // --- Dynamic Design of a Stable 4th-Order Highpass Butterworth Filter ---
     // The corner frequency is 4 times the start frequency
