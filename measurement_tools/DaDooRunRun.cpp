@@ -219,7 +219,7 @@ bool select_host_api_and_device(AppArgs& args) {
 
 // --- Step 3: Math and Stimulus Generation (with padding, filtering, gain, and clipping) ---
 std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float level_dB) {
-    float end_freq = 0.99f * sample_rate;
+    float end_freq = 0.99f * 0.5 * sample_rate; //end at 99% of Nyquist frequency
     float total_decades = std::log10(end_freq / start_freq);
     float duration = chirp_rate * total_decades;
     int num_samples = static_cast<int>(sample_rate * duration);
@@ -231,7 +231,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         float t = static_cast<float>(i) / sample_rate;
         stimulus[i] = std::sin(2.0f * M_PI * start_freq * duration / std::log(end_freq / start_freq) * (std::pow(end_freq / start_freq, t / duration) - 1.0f));
     }
-/*
+
     // 2. Apply Tapers (Half-Hann windows)
     int start_length = static_cast<int>(sample_rate * (duration * (0.3f / total_decades)));
     int end_length = static_cast<int>(sample_rate * (duration * (0.15f / total_decades)));
@@ -244,7 +244,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         float hann = 0.5f * (1.0f - std::cos(M_PI * i / end_length));
         stimulus[num_samples - end_length + i] *= (1.0f - hann);
     }
-*/
+
     // 3. Add 50 ms of padding at the start and 0.5 seconds at the end
     int start_pad_samples = static_cast<int>(sample_rate * 0.05f);
     int end_pad_samples = static_cast<int>(sample_rate * 0.5f);
@@ -286,7 +286,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
     // --- Apply the calculated SOS filter using 64-bit State Registers ---
     std::vector<float> filtered = stimulus; 
-/*    
+    
     for (int s = 0; s < 2; ++s) {
         double b0 = sos(s, 0), b1 = sos(s, 1), b2 = sos(s, 2);
         double a1 = sos(s, 4), a2 = sos(s, 5);
@@ -304,7 +304,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
             filtered[i] = static_cast<float>(y0);
         }
     } 
-*/
+
     // --- Apply Decibel Level Scaling ---
     float voltage_gain = static_cast<float>(std::pow(10.0, level_dB / 20.0));
     for (float& sample : filtered) {
