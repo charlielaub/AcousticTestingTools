@@ -252,6 +252,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     stimulus.insert(stimulus.begin(), start_pad_samples, 0.0f);
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
 
+/*
     // --- Dynamic Design of a Stable 4th-Order Highpass Butterworth Filter ---
     // The corner frequency is 4 times the start frequency
     double corner_freq = 4.0 * static_cast<double>(start_freq); // 4.0 Hz
@@ -302,7 +303,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
             
             filtered[i] = static_cast<float>(y0);
         }
-    }
+    } */
 
     // --- Apply Decibel Level Scaling ---
     float voltage_gain = static_cast<float>(std::pow(10.0, level_dB / 20.0));
