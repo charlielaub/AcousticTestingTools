@@ -20,12 +20,6 @@ This folder contains the source code for several Python programs that are use to
 * WAVplot - Plotting utility for up to 4 WAV files. Can simultaneously zoom all plots and save them to file as PNG or PDF files.  
 * ImpAlign - A tool for measurements made with the Measure, Move-Move, Measure Technique. Aligns the impulse response produced in measurement 2 with the impulse response from measurement 1, fixing any small alignment errors.  
 
-**Installation Instructions (Python and required modules)**  
+**Installation Instructions for the post-processing tools**  
 ------------------------------------------------------------------------------------------------------
-The code for all of the data post-processing programs remains uncompiled. To run these programs you must install Python on your machine including the following modules:
-* pandas  
-* numpy  
-* matplotlib  
-* scipy  
-
-Instructions for installing Python and the required modules under Windows and Ubuntu Linux are provided in the docs folder.  
+The python code for all of the data post-processing programs remains uncompiled. Instead you run then by invoking python plus the program name from within a terminal on your system. Installing Python, including the required modules, is easy. Installation instructions for both Windows and Ubuntu Linux are provided in the docs folder.  
