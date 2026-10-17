@@ -219,18 +219,36 @@ bool select_host_api_and_device(AppArgs& args) {
 
 // --- Step 3: Math and Stimulus Generation (with padding, filtering, gain, and clipping) ---
 std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float level_dB) {
-    float end_freq = 0.99f * 0.5f * sample_rate; //end at 99% of Nyquist frequency
+    float nyquist = 0.5f * static_cast<float>(sample_rate);
+    float end_freq = 0.99f * nyquist; // End at 99% of Nyquist frequency
+
+    // Basic input validation to prevent runtime crashes or division by zero
+    if (start_freq <= 0.0f || end_freq <= start_freq || chirp_rate <= 0.0f || sample_rate <= 0) {
+        throw std::invalid_argument("Invalid parameters for chirp generation.");
+    }
+
     float total_decades = std::log10(end_freq / start_freq);
     float duration = chirp_rate * total_decades;
-    int num_samples = static_cast<int>(sample_rate * duration);
+    int num_samples = static_cast<int>(static_cast<float>(sample_rate) * duration);
 
     std::vector<float> stimulus(num_samples);
 
-    // 1. Generate Logarithmic Chirp
+    // Convert decibels to a linear amplitude multiplier
+    float amplitude = std::pow(10.0f, level_dB / 20.0f);
+
+    // Precompute constant terms outside the loop for efficiency
+    const float ln_ratio = std::log(end_freq / start_freq);
+    const float phase_factor = start_freq * duration / ln_ratio;
+    const float ratio = end_freq / start_freq;
+    const float two_pi = 2.0f * static_cast<float>(M_PI);
+
+    // 1. Generate Logarithmic Chirp with Amplitude Scaling
     for (int i = 0; i < num_samples; ++i) {
-        float t = static_cast<float>(i) / sample_rate;
-        stimulus[i] = std::sin(2.0f * M_PI * start_freq * duration / std::log(end_freq / start_freq) * (std::pow(end_freq / start_freq, t / duration) - 1.0f));
+        float t = static_cast<float>(i) / static_cast<float>(sample_rate);
+        float phase = two_pi * phase_factor * (std::pow(ratio, t / duration) - 1.0f);
+        stimulus[i] = amplitude * std::sin(phase);
     }
+
 /* 
     // 2. Apply Tapers (Half-Hann windows)
     int start_length = static_cast<int>(sample_rate * (duration * (0.3f / total_decades)));
@@ -302,12 +320,6 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         }
     } 
 */
-    // --- Apply Decibel Level Scaling ---
-    float voltage_gain = static_cast<float>(std::pow(10.0, level_dB / 20.0));
-    for (float& sample : filtered) {
-        sample *= voltage_gain;
-    }
-
     // --- Hard clip individual samples that exceed +/- 1.0 (0 dBFS) ---
     int clipped_count = 0;
     for (float& sample : filtered) {
@@ -319,7 +331,6 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
             clipped_count++;
         }
     }
-
     if (clipped_count > 0) {
         std::cout << "Warning: " << clipped_count << " samples exceeded +/- 1.0 and were clipped.\n";
     }
