@@ -6,10 +6,10 @@ The repository consists of multiple programs in two directories:
 **measurement_tools folder:**  
 ------------------------------------------------------------------------------------------------------
 This folder contains the source code for two programs related to data acquisition and data measurement.  
-* Probe_audio - this program provides information about the audio devices available on the local machine  
+* ProbeAudio - this program provides information about the audio devices available on the local machine  
 * DaDooRunRun - this is a response measurement program intended to measure the response of a DUT when given a test stimulus. Multiple data collection runs can be performed and averaged (e.g. time synchronous averaging) to improve data S/N. The stimulus is a windowed and filtered log-chirp with user-defined sweep rate. A pause between measurements of a user-defined mean duration, plus 10% random variation to reduce reinforcement of room echo. It produces raw measurement and stimulus data files that must be post-processed into the system impulse response and then into frequency domain response data using the tools in the post processing tools folder. Data is saved to WAV files in the FLOAT32 format.  
 
-The source code has been built into executables that are available for Windows and Linux in the latest project release. See the RELEASES page to download them.
+The source code for DaDooRunRun and ProbeAudio has been built into binary executable files for Windows and Linux. These may be found in the respective folders in the latest project release.  
 
 **post_processing_tools folder:**  
 ------------------------------------------------------------------------------------------------------
