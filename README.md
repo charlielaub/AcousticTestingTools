@@ -26,6 +26,6 @@ The code for all of the data post-processing programs remains uncompiled. To run
 * pandas  
 * numpy  
 * matplotlib  
-* scipy
+* scipy  
 
-Instructions for installing Python and the required modules under Windows and Ubuntu Linux are provided in the docs folder.
+Instructions for installing Python and the required modules under Windows and Ubuntu Linux are provided in the docs folder.  
