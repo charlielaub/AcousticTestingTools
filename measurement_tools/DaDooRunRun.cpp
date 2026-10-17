@@ -2,7 +2,7 @@
 /*                                                                            */
 /*   DaDooRunRun.cpp                                                          */
 /*   Copyright (c) 2026 Charlie Laub                                          */
-/*   Licensed under the MIT License. See LICENSE file in the project root     */                                                                         */
+/*   Licensed under the MIT License. See LICENSE file in the project root     */
 /*     for full license information.                                          */
 /*                                                                            */
 /*   Generates a windowed and filtered chirp stimulus signal. Plays the       */
