@@ -379,33 +379,55 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 // --- Step 4: Window-Constrained Cross Correlation Alignment ---
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
-    const std::vector<std::vector<float>>& mic_history) 
+    const std::vector<std::vector<float>>& mic_history,
+    float sample_rate) 
 {
     size_t num_runs = ref_history.size();
+    if (num_runs == 0) return {};
     size_t signal_size = ref_history[0].size();
     
     std::vector<std::vector<float>> aligned_ref = {ref_history[0]};
     std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
 
-    int max_lag = 3; //only search the very nearby samples!
+    // max time lag in milliseconds:
+    static constexpr float max_time_ms = 3.0f;
 
-    if ( num_runs > 1 ) {
+    // Convert time window (milliseconds) to number of samples based on sample rate
+    int max_lag = static_cast<int>(std::round((max_time_ms / 1000.0f) * sample_rate));
+
+    if (num_runs > 1) {
         std::cout << "\n--- Performing Window-Constrained Cross-Correlation Alignment ---\n";
+        std::cout << "Max lag window: " << max_time_ms << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
+
     for (size_t i = 1; i < num_runs; ++i) {
         float max_corr = -1e20f;
         int best_lag = 0;
 
+        // Find best lag using normalized cross-correlation
         for (int lag = -max_lag; lag <= max_lag; ++lag) {
             float current_dot = 0.0f;
+            float ref0_energy = 0.0f;
+            float ref_i_energy = 0.0f;
+            int count = 0;
+
             for (size_t n = 0; n < signal_size; ++n) {
                 long long ref_idx = static_cast<long long>(n) + lag;
                 if (ref_idx >= 0 && ref_idx < static_cast<long long>(signal_size)) {
-                    current_dot += ref_history[0][n] * ref_history[i][ref_idx];
+                    float val0 = ref_history[0][n];
+                    float vali = ref_history[i][ref_idx];
+                    current_dot += val0 * vali;
+                    ref0_energy += val0 * val0;
+                    ref_i_energy += vali * vali;
+                    count++;
                 }
             }
-            if (current_dot > max_corr) {
-                max_corr = current_dot;
+
+            float denominator = std::sqrt(ref0_energy * ref_i_energy);
+            float ncc = (denominator > 1e-5f) ? (current_dot / denominator) : 0.0f;
+
+            if (ncc > max_corr) {
+                max_corr = ncc;
                 best_lag = lag;
             }
         }
@@ -415,13 +437,14 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::vector<float> shifted_ref(signal_size, 0.0f);
         std::vector<float> shifted_mic(signal_size, 0.0f);
 
+        // Corrected shift direction
         if (best_lag > 0) {
-            std::copy(ref_history[i].begin(), ref_history[i].end() - best_lag, shifted_ref.begin() + best_lag);
-            std::copy(mic_history[i].begin(), mic_history[i].end() - best_lag, shifted_mic.begin() + best_lag);
+            std::copy(ref_history[i].begin() + best_lag, ref_history[i].end(), shifted_ref.begin());
+            std::copy(mic_history[i].begin() + best_lag, mic_history[i].end(), shifted_mic.begin());
         } else if (best_lag < 0) {
             int abs_lag = std::abs(best_lag);
-            std::copy(ref_history[i].begin() + abs_lag, ref_history[i].end(), shifted_ref.begin());
-            std::copy(mic_history[i].begin() + abs_lag, mic_history[i].end(), shifted_mic.begin());
+            std::copy(ref_history[i].begin(), ref_history[i].end() - abs_lag, shifted_ref.begin() + abs_lag);
+            std::copy(mic_history[i].begin(), mic_history[i].end() - abs_lag, shifted_mic.begin() + abs_lag);
         } else {
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
@@ -431,6 +454,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         aligned_mic.push_back(shifted_mic);
     }
 
+    // Compute average across runs
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
@@ -438,8 +462,8 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             avg_ref[n] += aligned_ref[i][n];
             avg_mic[n] += aligned_mic[i][n];
         }
-        avg_ref[n] /= num_runs;
-        avg_mic[n] /= num_runs;
+        avg_ref[n] /= static_cast<float>(num_runs);
+        avg_mic[n] /= static_cast<float>(num_runs);
     }
 
     return {avg_ref, avg_mic};
@@ -556,7 +580,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     Pa_StopStream(stream);
     Pa_CloseStream(stream);
 
-    return align_and_average(ref_history, mic_history);
+    return align_and_average(ref_history, mic_history, args.sample_rate);
 }
 
 
