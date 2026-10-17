@@ -456,7 +456,20 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
 
     Pa_StartStream(stream);
 
-    for (int r = 0; r < args.repetitions; ++r) {
+    // --- 3-SECOND WARM-UP PERIOD ---
+    // Calculate samples for 3 seconds of silence and stream zeros to wake up 
+    //    the output device before performing the measurement repetitions
+    int warm_up_samples = 3 * args.sample_rate;
+    std::vector<float> warm_up_buffer(warm_up_samples * pa_out_channels, 0.0f);
+    
+    std::cout << "Warming up output device for 3 seconds...\n";
+    PaError write_err = Pa_WriteStream(stream, warm_up_buffer.data(), warm_up_samples);
+    if (write_err != paNoError) {
+        std::cerr << "PortAudio Error during warm-up write: " << Pa_GetErrorText(write_err) << "\n";
+    }
+    // -------------------------------
+    
+        for (int r = 0; r < args.repetitions; ++r) {
         std::cout << "Capturing measurement #" << r + 1 << " of " << args.repetitions << "...\n";
 
         std::vector<float> input_buffer(total_samples * pa_in_channels, 0.0f);
