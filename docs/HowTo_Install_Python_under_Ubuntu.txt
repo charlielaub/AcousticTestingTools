@@ -1,0 +1,26 @@
+To install Python and the necessary modules on Linux Ubuntu follow these steps.
+
+NOTE: Using apt, Ubuntu's built-in package manager, is the safest method for your system. It guarantees all packages are pre-compiled and fully compatible with your OS version without needing pip or virtual environments.
+
+Step 1: Open a bash terminal
+
+Step 2: Update Your Package Index
+  sudo apt update
+
+Step 3: Install Everything via APT. Copy and paste the following line, and then press Enter:
+  sudo apt install python3 python3-pandas python3-numpy python3-matplotlib python3-scipy -y
+Note: The -y flag automatically answers "yes" to the installation prompt, allowing the process to finish without interruption.
+
+Step 4: Verify the Installation
+To ensure everything was mapped correctly by the system, run a quick check directly in your terminal:
+1. Type 
+  python3 
+and press Enter to open the interactive Python shell (>>>).
+2. Copy, paste, and run this code:python
+  import pandas as pd
+  import numpy as np
+  import matplotlib.pyplot as plt
+  import scipy
+  print("All modules successfully installed via APT!")
+
+3. If the terminal prints "All modules successfully installed via APT!" without any errors, your setup is complete. Type exit() and press Enter to return to your normal terminal.
