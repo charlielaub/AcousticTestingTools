@@ -249,7 +249,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         stimulus[i] = amplitude * std::sin(phase);
     }
 
-/* 
+ 
     // 2. Apply Tapers (Half-Hann windows)
     int start_length = static_cast<int>(sample_rate * (duration * (0.3f / total_decades)));
     int end_length = static_cast<int>(sample_rate * (duration * (0.15f / total_decades)));
@@ -262,7 +262,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         float hann = 0.5f * (1.0f - std::cos(M_PI * i / end_length));
         stimulus[num_samples - end_length + i] *= (1.0f - hann);
     }
-*/
+
     // 3. Add 0.5sec of zero padding at the end
     int end_pad_samples = static_cast<int>(sample_rate * 0.5f);
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
