@@ -307,13 +307,13 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
     // --- Apply Decibel Level Scaling ---
     float voltage_gain = static_cast<float>(std::pow(10.0, level_dB / 20.0));
-    for (float& sample : filtered) {
+    for (float& sample : stimulus) {
         sample *= voltage_gain;
     }
 
     // --- Hard clip individual samples that exceed +/- 1.0 (0 dBFS) ---
     int clipped_count = 0;
-    for (float& sample : filtered) {
+    for (float& sample : stimulus) {
         if (sample > 1.0f) {
             sample = 1.0f;
             clipped_count++;
@@ -327,7 +327,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         std::cout << "Warning: " << clipped_count << " samples exceeded +/- 1.0 and were clipped.\n";
     }
 
-    return filtered;
+    return stimulus;
 }
 
 // --- Step 4: Window-Constrained Cross Correlation Alignment ---
