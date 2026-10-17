@@ -387,7 +387,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     std::vector<std::vector<float>> aligned_ref = {ref_history[0]};
     std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
 
-    int max_lag = 500; 
+    int max_lag = 3; //only search the very nearby samples!
 
     if ( num_runs > 1 ) {
         std::cout << "\n--- Performing Window-Constrained Cross-Correlation Alignment ---\n";
