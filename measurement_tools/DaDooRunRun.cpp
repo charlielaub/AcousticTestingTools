@@ -337,7 +337,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
     // --- Hard clip individual samples that exceed +/- 1.0 (0 dBFS) ---
     int clipped_count = 0;
-    for (float& sample : filtered) {
+    for (float& sample : final_output) {
         if (sample > 1.0f) {
             sample = 1.0f;
             clipped_count++;
@@ -350,7 +350,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         std::cout << "Warning: " << clipped_count << " samples exceeded +/- 1.0 and were clipped.\n";
     }
 
-    return filtered;
+    return final_output;
 }
 
 // --- Step 4: Window-Constrained Cross Correlation Alignment ---
