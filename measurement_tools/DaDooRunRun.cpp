@@ -439,6 +439,7 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
     return output;
 }
 
+
 // Main alignment and averaging function with sub-sample precision
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
@@ -538,6 +539,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     return {avg_ref, avg_mic};
 }
+
 
 
 // --- Step 5: Full-Duplex Audio Run Execution (Stream Stays Open Across Repetitions) ---
