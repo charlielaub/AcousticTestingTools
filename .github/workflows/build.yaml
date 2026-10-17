@@ -43,28 +43,31 @@ jobs:
       - name: Build Project
         run: cmake --build build --config Release
 
-      # --- Rename and Package Windows Binaries ---
-      - name: Prepare Windows Artifacts
+      # --- Package Windows Programs into a .zip ---
+      - name: Package Windows Binaries
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "dist"
-          Copy-Item "build/Release/DaDooRunRun.exe" "dist/DaDooRunRun-Windows.exe"
-          Copy-Item "build/Release/ProbeAudioDevs.exe" "dist/ProbeAudioDevs-Windows.exe"
+          New-Item -ItemType Directory -Force -Path "dist/Windows-programs"
+          Copy-Item "build/Release/DaDooRunRun.exe" "dist/Windows-programs/"
+          Copy-Item "build/Release/ProbeAudioDevs.exe" "dist/Windows-programs/"
+          Compress-Archive -Path "dist/Windows-programs" -DestinationPath "dist/Windows-programs.zip"
 
-      # --- Rename and Package Linux Binaries ---
-      - name: Prepare Linux Artifacts
+      # --- Package Linux Programs into a .tar.gz ---
+      - name: Package Linux Binaries
         if: matrix.os == 'ubuntu-24.04'
         run: |
-          mkdir -p dist
-          cp build/DaDooRunRun dist/DaDooRunRun-Linux
-          cp build/ProbeAudioDevs dist/ProbeAudioDevs-Linux
+          mkdir -p dist/Linux-programs
+          cp build/DaDooRunRun dist/Linux-programs/
+          cp build/ProbeAudioDevs dist/Linux-programs/
+          cd dist && tar -czvf Linux-programs.tar.gz Linux-programs
 
-      # --- Upload Only Platform-Specific Assets ---
+      # --- Upload Platform-Specific Archives ---
       - name: Upload Binaries to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*
+            dist/Windows-programs.zip
+            dist/Linux-programs.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
