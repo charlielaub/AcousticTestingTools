@@ -23,8 +23,8 @@ This folder contains the source code for several Python programs that are use to
 **Installation Instructions (Python and required modules)**  
 ------------------------------------------------------------------------------------------------------
 The code for all of the data post-processing programs remains uncompiled. To run these programs you must install Python on your machine including the following modules:
-pandas
-numpy
-matplotlib
-scipy
+* pandas  
+* numpy  
+* matplotlib  
+* scipy  
 Instructions for installing Python and the required modules under Windows and Ubuntu Linux are provided in the docs folder.
