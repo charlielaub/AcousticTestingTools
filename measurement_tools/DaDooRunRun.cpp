@@ -245,11 +245,8 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         stimulus[num_samples - end_length + i] *= (1.0f - hann);
     }
 
-    // 3. Add 50 ms of padding at the start and 0.5 seconds at the end
-    int start_pad_samples = static_cast<int>(sample_rate * 0.05f);
+    // 3. Add 0.5sec of zero padding at the end
     int end_pad_samples = static_cast<int>(sample_rate * 0.5f);
-    
-    stimulus.insert(stimulus.begin(), start_pad_samples, 0.0f);
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
  
 
@@ -286,7 +283,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
     // --- Apply the calculated SOS filter using 64-bit State Registers ---
     std::vector<float> filtered = stimulus; 
-    
+/*    
     for (int s = 0; s < 2; ++s) {
         double b0 = sos(s, 0), b1 = sos(s, 1), b2 = sos(s, 2);
         double a1 = sos(s, 4), a2 = sos(s, 5);
@@ -304,7 +301,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
             filtered[i] = static_cast<float>(y0);
         }
     } 
-
+*/
     // --- Apply Decibel Level Scaling ---
     float voltage_gain = static_cast<float>(std::pow(10.0, level_dB / 20.0));
     for (float& sample : filtered) {
