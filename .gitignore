@@ -1,0 +1,21 @@
+# Build directories
+build/
+bin/
+Out/
+
+# Compiled object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
