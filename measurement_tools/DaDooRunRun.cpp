@@ -536,8 +536,8 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
         std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.";
         
-        if ( refined_lag < 1.0 ) {
-            std::cout << " Jitter is less than one sample. No jitter adjustment is necessary for this run.\n";
+        if ( std::abs(refined_lag) <= 0.5 ) {
+            std::cout << " Jitter is less than one-half sample. No jitter adjustment is necessary for this run.\n";
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } else {
