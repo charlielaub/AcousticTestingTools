@@ -18,13 +18,16 @@ if(WIN32)
     # Windows GitHub CI Path: Build PortAudio from source with native ASIO support
     message(STATUS "Windows detected. Automating ASIO SDK and PortAudio source compilation...")
 
-    # 1. Download Steinberg ASIO SDK on the fly
+    # 1. Download a direct zip release from Steinberg's official GitHub distribution mirror
     FetchContent_Declare(
         asiosdk
-        URL https://steinberg.net
+        URL https://github.com
     )
     FetchContent_MakeAvailable(asiosdk)
-    set(ASIO_SDK_PATH ${asiosdk_SOURCE_DIR})
+
+    # Steinberg's repository nests the actual source code under a subfolder.
+    # We point to that exact subfolder so PortAudio knows where to look:
+    set(ASIO_SDK_PATH "${asiosdk_SOURCE_DIR}/asiosdk-2.3.3")
 
     # 2. Configure PortAudio to use the ASIO driver backend
     set(PA_USE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
