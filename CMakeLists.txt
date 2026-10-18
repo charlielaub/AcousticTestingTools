@@ -17,23 +17,30 @@ find_package(Eigen3 REQUIRED)
 if(WIN32)
     message(STATUS "Windows detected. Automating ASIO SDK and PortAudio source compilation...")
 
-    # Force clear tracking properties explicitly using separate argument lines
+    # 1. Force CMake to ignore the vcpkg toolchain file for this sub-download
     FetchContent_Declare(
         asiosdk
         GIT_REPOSITORY "https://github.com"
         GIT_TAG        "master"
+        SYSTEM # Tells CMake this is an external system dependency
+        CMAKE_ARGS 
+            "-DCMAKE_TOOLCHAIN_FILE=" # Overrides and clears the toolchain for the sub-build
     )
     FetchContent_MakeAvailable(asiosdk)
     
     set(ASIO_SDK_PATH "${asiosdk_SOURCE_DIR}")
 
-    # Configure PortAudio dependencies
+    # 2. Configure PortAudio
     set(PA_USE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
     
+    # Apply the same isolation override to PortAudio to protect its download step
     FetchContent_Declare(
         portaudio
         GIT_REPOSITORY "https://github.com"
         GIT_TAG        "master"
+        SYSTEM
+        CMAKE_ARGS 
+            "-DCMAKE_TOOLCHAIN_FILE="
     )
     FetchContent_MakeAvailable(portaudio)
 else()
