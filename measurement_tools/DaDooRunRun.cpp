@@ -37,6 +37,7 @@
 #endif
 // Conditionally include Windows ASIO specific headers to query low-level buffer parameters
 #ifdef _WIN32
+#include <windows.h>
 #include "pa_asio.h"
 #endif
 
@@ -595,8 +596,8 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     // -----------------------------------------------------------------
     #ifdef _WIN32
     // Setup container structs for Windows ASIO behavior flags
-    PaWinAsioStreamInfo asioInputInfo;
-    PaWinAsioStreamInfo asioOutputInfo;
+    PaAsioStreamInfo asioInputInfo;
+    PaAsioStreamInfo asioOutputInfo;
 
     // Retrieve the active host API index bound to your target device
     const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
