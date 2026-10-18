@@ -15,21 +15,13 @@ find_package(Eigen3 REQUIRED)
 # PortAudio System Configurations
 # -------------------------------------------------------------
 if(WIN32)
-    message(STATUS "Windows detected. Configuring automated audio dependencies...")
+    message(STATUS "Windows detected. Configuring automated audio dependencies via vcpkg...")
 
-    # 1. Use the local ASIO SDK path provided by the GitHub runner
-    if(DEFINED ASIO_SDK_LOCAL_PATH)
-        message(STATUS "Using pre-downloaded ASIO SDK from: ${ASIO_SDK_LOCAL_PATH}")
-        set(ASIO_SDK_PATH "${ASIO_SDK_LOCAL_PATH}")
-    else()
-        # Fallback for local development machines if variable isn't specified
-        message(FATAL_ERROR "ASIO_SDK_LOCAL_PATH not set! Please pass -DASIO_SDK_LOCAL_PATH=/path/to/sdk")
-    endif()
-
-    # 2. Configure PortAudio to use the local ASIO driver layers
+    # Configure PortAudio to use the ASIO driver layers natively
     set(PA_USE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
     
-    # Clone and build PortAudio source directly into the project tree
+    # PortAudio source code is cloned via FetchContent. 
+    # It dynamically detects the vcpkg-installed "asiosdk" configuration automatically.
     FetchContent_Declare(
         portaudio
         GIT_REPOSITORY "https://github.com"

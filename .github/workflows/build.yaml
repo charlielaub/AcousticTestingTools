@@ -29,37 +29,20 @@ jobs:
 
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
-        # REMOVED portaudio from vcpkg install so it does not conflict with our custom ASIO build
+        # FIX: Install the official open-source asiosdk port directly via vcpkg
         run: |
-          vcpkg install eigen3:x64-windows-static
+          vcpkg install eigen3:x64-windows-static asiosdk:x64-windows-static
 
-      # --- Native, reliable archive extraction ---
-      - name: Download Steinberg ASIO SDK (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: |
-          # Use curl.exe directly (built into Windows) to handle GitHub redirects flawlessly (-L follows redirects)
-          curl.exe -L "https://github.com" -o "asiosdk.zip"
-          
-          # Verify the file is not empty before attempting extraction
-          if ((Get-Item "asiosdk.zip").Length -lt 10KB) {
-              Write-Error "Downloaded zip file is too small. The download likely failed or was blocked."
-              exit 1
-          }
-          
-          # Extract the valid zip file
-          Expand-Archive -Path "asiosdk.zip" -DestinationPath "."
-          # Rename the extracted folder to a clean name for CMake
-          Rename-Item -Path "asiosdk-2.3.3" -NewName "asiosdk"
+      # Note: The manual Download PowerShell block has been safely removed entirely!
 
-      - name: Configure CMake (Ubuntu)
+       Calvary-name: Configure CMake (Ubuntu)
         if: matrix.os == 'ubuntu-24.04'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Configure CMake (Windows)
         if: matrix.os == 'windows-latest'
-        # Added -DASIO_SDK_LOCAL_PATH to link the runner-downloaded SDK securely
-        run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DASIO_SDK_LOCAL_PATH="${{ github.workspace }}/asiosdk"
+        # Removed the manual local path flag. vcpkg handles alignment under the hood automatically.
+        run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
       - name: Build Project
         run: cmake --build build --config Release
