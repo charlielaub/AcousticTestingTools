@@ -555,19 +555,19 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     if (args.sample_rate >= 192000) block_size = 512;
     else if (args.sample_rate >= 88200) block_size = 256;
 
-    int total_samples = stimulus.size();
-
-    // Since we are using explicit non-sequential channel selectors, 
-    // we want a 2-channel stream (e.g., [ref/channel A, mic/channel B])
     int pa_out_channels = 2;
     int pa_in_channels  = 2;
 
-    // Build the interleaved output buffer for the 2 selected output channels
+    int total_samples = stimulus.size();
+
     std::vector<float> output_buffer(total_samples * pa_out_channels, 0.0f);
     for (int i = 0; i < total_samples; ++i) {
         int frame_offset = i * pa_out_channels;
-        output_buffer[frame_offset + 0] = stimulus[i]; // Stream channel 0 maps to out_channels[0]
-        output_buffer[frame_offset + 1] = stimulus[i]; // Stream channel 1 maps to out_channels[1]
+        // FIX: Always use local stream indices 0 and 1 for custom channel mapping!
+        // Local channel 0 maps to your first target output hardware channel
+        output_buffer[frame_offset + 0] = stimulus[i]; 
+        // Local channel 1 maps to your second target output hardware channel
+        output_buffer[frame_offset + 1] = stimulus[i]; 
     }
 
     std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples));
