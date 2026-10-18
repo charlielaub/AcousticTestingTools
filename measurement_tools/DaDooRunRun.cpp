@@ -558,6 +558,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     int block_size = 256;
     if (args.sample_rate >= 192000) block_size = 1024;
     else if (args.sample_rate >= 88200) block_size = 512;
+    block_size = 2048;
 
     int total_samples = stimulus.size();
 
