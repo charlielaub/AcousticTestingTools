@@ -551,33 +551,30 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
 // --- Step 5: Full-Duplex Audio Run Execution (Stream Stays Open Across Repetitions) ---
 std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(AppArgs& args, const std::vector<float>& stimulus) {
-    int block_size = 256;
-    if (args.sample_rate >= 192000) block_size = 1024;
-    else if (args.sample_rate >= 88200) block_size = 512;
+    int block_size = 128;
+    if (args.sample_rate >= 192000) block_size = 512;
+    else if (args.sample_rate >= 88200) block_size = 256;
 
     int total_samples = stimulus.size();
 
-    int pa_out_channels = std::max(args.out_channels[0], args.out_channels[1]) + 1;
-    int pa_in_channels  = std::max(args.in_channels[0],  args.in_channels[1])  + 1;
+    // Since we are using explicit non-sequential channel selectors, 
+    // we want a 2-channel stream (e.g., [ref/channel A, mic/channel B])
+    int pa_out_channels = 2;
+    int pa_in_channels  = 2;
 
-    if (pa_out_channels < 2) pa_out_channels = 2;
-    if (pa_in_channels < 2)  pa_in_channels  = 2;
-
+    // Build the interleaved output buffer for the 2 selected output channels
     std::vector<float> output_buffer(total_samples * pa_out_channels, 0.0f);
     for (int i = 0; i < total_samples; ++i) {
         int frame_offset = i * pa_out_channels;
-        output_buffer[frame_offset + args.out_channels[0]] = stimulus[i];
-        output_buffer[frame_offset + args.out_channels[1]] = stimulus[i];
+        output_buffer[frame_offset + 0] = stimulus[i]; // Stream channel 0 maps to out_channels[0]
+        output_buffer[frame_offset + 1] = stimulus[i]; // Stream channel 1 maps to out_channels[1]
     }
 
     std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples));
     std::vector<std::vector<float>> mic_history(args.repetitions, std::vector<float>(total_samples));
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
-
     std::cout << "\nStarting " << args.repetitions << " sequential measurements using " << args.sample_rate << "Hz sampling rate...\n";
-    std::cout << "Opening hardware stream with: " << pa_in_channels << " inputs and " << pa_out_channels << " outputs (Stream remains open across all repetitions).\n";
+    std::cout << "Opening hardware stream with 2 inputs and 2 outputs using custom ASIO channel mapping.\n";
 
     PaStreamParameters inputParameters, outputParameters;
     inputParameters.device = args.input_device_idx;
@@ -593,40 +590,45 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     outputParameters.hostApiSpecificStreamInfo = nullptr;
 
     // -----------------------------------------------------------------
-    // Cross-Platform ASIO Stream Integration Track
+    // Windows ASIO Non-Sequential Channel Selection Setup
     // -----------------------------------------------------------------
     #ifdef _WIN32
-    // Setup container structs for Windows ASIO behavior flags
     PaAsioStreamInfo asioInputInfo;
     PaAsioStreamInfo asioOutputInfo;
 
-    // Retrieve the active host API index bound to your target device
     const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
     const PaDeviceInfo* outputDevInfo = Pa_GetDeviceInfo(args.output_device_idx);
 
+    // Static arrays to hold the non-sequential channel selectors 
+    // (must remain alive during Pa_OpenStream)
+    static int inputChannelSelectors[2];
+    static int outputChannelSelectors[2];
+
     if (inputDevInfo && Pa_GetHostApiInfo(inputDevInfo->hostApi)->type == paASIO) {
+        inputChannelSelectors[0] = args.in_channels[0];
+        inputChannelSelectors[1] = args.in_channels[1];
+
         asioInputInfo.size = sizeof(PaAsioStreamInfo);
         asioInputInfo.hostApiType = paASIO;
         asioInputInfo.version = 1;
         asioInputInfo.flags = paAsioUseChannelSelectors;
+        asioInputInfo.channelSelectors = inputChannelSelectors; 
         
-        // Tells the driver to use direct, sequential hardware mappings
-        asioInputInfo.channelSelectors = nullptr; 
         inputParameters.hostApiSpecificStreamInfo = &asioInputInfo;
-        
-        // Force minimum possible latency bound to ASIO audio hardware buffers
         inputParameters.suggestedLatency = inputDevInfo->defaultLowInputLatency;
     }
 
     if (outputDevInfo && Pa_GetHostApiInfo(outputDevInfo->hostApi)->type == paASIO) {
+        outputChannelSelectors[0] = args.out_channels[0];
+        outputChannelSelectors[1] = args.out_channels[1];
+
         asioOutputInfo.size = sizeof(PaAsioStreamInfo);
         asioOutputInfo.hostApiType = paASIO;
         asioOutputInfo.version = 1;
         asioOutputInfo.flags = paAsioUseChannelSelectors;
+        asioOutputInfo.channelSelectors = outputChannelSelectors;
         
-        asioOutputInfo.channelSelectors = nullptr;
         outputParameters.hostApiSpecificStreamInfo = &asioOutputInfo;
-        
         outputParameters.suggestedLatency = outputDevInfo->defaultLowOutputLatency;
     }
     #endif
@@ -638,7 +640,6 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     PaError err = Pa_IsFormatSupported(&inputParameters, &outputParameters, args.sample_rate);
     if (err != paFormatIsSupported) {
         std::cerr << "PortAudio Error: Format not supported: " << Pa_GetErrorText(err) << "\n";
-        Pa_CloseStream(stream);
         return {};
     }
 
@@ -650,14 +651,16 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         args.sample_rate,
         block_size,
         paNoFlag,
-        nullptr, // Optional callback function (nullptr for blocking/read-write mode)
-        nullptr  // Optional user data pointer passed to the callback
+        nullptr, // Callback function (nullptr for blocking/read-write mode)
+        nullptr  // User data pointer
     );
 
     if (err != paNoError) {
         std::cerr << "PortAudio Error opening stream: " << Pa_GetErrorText(err) 
                   << " (Errno: " << err << ")\n";
-        Pa_CloseStream(stream);
+        if (stream) {
+            Pa_CloseStream(stream);
+        }
         return {};
     }
 
