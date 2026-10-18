@@ -480,6 +480,9 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::cout << "Max lag window: " << max_time_ms << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
+    std::vector<float> shifted_ref;
+    std::vector<float> shifted_mic;
+
     for (size_t i = 1; i < num_runs; ++i) {
         float max_corr = -1e20f;
         int best_lag = 0;
@@ -535,13 +538,13 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         
         if ( refined_lag < 1.0 ) {
             std::cout << " Jitter is less than one sample. No jitter adjustment is necessary for this run.\n";
-            std::vector<float> shifted_ref = ref_history[i];
-            std::vector<float> shifted_mic = mic_history[i];
+            shifted_ref = ref_history[i];
+            shifted_mic = mic_history[i];
         } else {
             std::cout << " Correcting timing jitter for this run.\n";
             // 3. Shift both reference and microphone signals using the fractional delay filter
-            std::vector<float> shifted_ref = fractional_delay_filter(ref_history[i], refined_lag);
-            std::vector<float> shifted_mic = fractional_delay_filter(mic_history[i], refined_lag);
+            shifted_ref = fractional_delay_filter(ref_history[i], refined_lag);
+            shifted_mic = fractional_delay_filter(mic_history[i], refined_lag);
         }
 
         aligned_ref.push_back(shifted_ref);
