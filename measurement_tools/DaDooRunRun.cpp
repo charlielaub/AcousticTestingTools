@@ -46,10 +46,11 @@ struct AppArgs {
     float start_freq = 1.0f;
     int repetitions = 1;
     float warm_up_delay = 3.0f;
-    float mean_wait = 3.0f;
+    float mean_wait = 1.0f;
     float level = -6.0f; // Default level in dB (must be <= 0.0)
     int api_idx = -1;
-    int device_idx = -1;
+    int input_device_idx = -1;
+    int output_device_idx = -1;
     int out_channels[2] = {-1, -1};
     int in_channels[2] = {-1, -1};
 };
@@ -70,9 +71,10 @@ void show_help_info(const char* prog_name) {
               << "  --warm_up_delay <float>         Length of DAC warm-up delay in seconds (default: 3.0)\n"
               << "  --mean_wait <float>             Average pause between runs in seconds (default: 3.0)\n"
               << "  --api_idx <int>                 PortAudio host API index\n"
-              << "  --device_idx <int>              PortAudio hardware device index\n"
-              << "  --output_channels <id1> <id2>   Two physical output channel indices\n"
+              << "  --input_device_idx <int>        PortAudio hardware input device index\n"
+              << "  --output_device_idx <int>       PortAudio hardware output device index\n"
               << "  --input_channels <id1> <id2>    Two physical input channel indices\n"
+              << "  --output_channels <id1> <id2>   Two physical output channel indices\n"
               << "  --help, -h                      Display this help message and exit\n\n"
               << "NOTES:\n"
               << "    The command line parameters may be provided in any order.\n"
@@ -108,14 +110,15 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             }
         }
         else if (arg == "--api_idx" && i + 1 < argc) args.api_idx = std::stoi(argv[++i]);
-        else if (arg == "--device_idx" && i + 1 < argc) args.device_idx = std::stoi(argv[++i]);
-        else if (arg == "--output_channels" && i + 2 < argc) {
-            args.out_channels[0] = std::stoi(argv[++i]);
-            args.out_channels[1] = std::stoi(argv[++i]);
-        }
+        else if (arg == "--input_device_idx" && i + 1 < argc) args.device_idx = std::stoi(argv[++i]);
+        else if (arg == "--output_device_idx" && i + 1 < argc) args.device_idx = std::stoi(argv[++i]);
         else if (arg == "--input_channels" && i + 2 < argc) {
             args.in_channels[0] = std::stoi(argv[++i]);
             args.in_channels[1] = std::stoi(argv[++i]);
+        }
+        else if (arg == "--output_channels" && i + 2 < argc) {
+            args.out_channels[0] = std::stoi(argv[++i]);
+            args.out_channels[1] = std::stoi(argv[++i]);
         }
     }
     return args;
@@ -573,13 +576,13 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     std::cout << "Opening hardware stream with: " << pa_in_channels << " inputs and " << pa_out_channels << " outputs (Stream remains open across all repetitions).\n";
 
     PaStreamParameters inputParameters, outputParameters;
-    inputParameters.device = args.device_idx;
+    inputParameters.device = args.input_device_idx;
     inputParameters.channelCount = pa_in_channels;
     inputParameters.sampleFormat = paFloat32;
     inputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->defaultLowInputLatency;
     inputParameters.hostApiSpecificStreamInfo = nullptr;
 
-    outputParameters.device = args.device_idx;
+    outputParameters.device = args.output_device_idx;
     outputParameters.channelCount = pa_out_channels;
     outputParameters.sampleFormat = paFloat32;
     outputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->defaultLowOutputLatency;
@@ -594,7 +597,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
 
     Pa_StartStream(stream);
 
-    // --- DAC WARM-UP PERIOD ---
+    // BEGIN WITH A DAC WARM-UP PERIOD:
     // Streams silence/zeros to wake up DAC and allow the data acqusition 
     // settings to initialize before performing the measurement repetitions
     int warm_up_samples = args.warm_up_delay * args.sample_rate;
