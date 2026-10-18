@@ -531,11 +531,18 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples\n";
-
-        // 3. Shift both reference and microphone signals using the fractional delay filter
-        std::vector<float> shifted_ref = fractional_delay_filter(ref_history[i], refined_lag);
-        std::vector<float> shifted_mic = fractional_delay_filter(mic_history[i], refined_lag);
+        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.";
+        
+        if ( refined_lag < 1.0 ) {
+            std::cout << " Jitter is less than one sample. No jitter adjustment is necessary for this run.\n";
+            std::vector<float> shifted_ref = ref_history[i];
+            std::vector<float> shifted_mic = mic_history[i];
+        } else {
+            std::cout << " Correcting timing jitter for this run.\n";
+            // 3. Shift both reference and microphone signals using the fractional delay filter
+            std::vector<float> shifted_ref = fractional_delay_filter(ref_history[i], refined_lag);
+            std::vector<float> shifted_mic = fractional_delay_filter(mic_history[i], refined_lag);
+        }
 
         aligned_ref.push_back(shifted_ref);
         aligned_mic.push_back(shifted_mic);
