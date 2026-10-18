@@ -547,9 +547,9 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.\n";
         
         if ( refined_lag > max_lag ) {
-            std::cout << " Timing jitter exceeded " << max_time_ms <, " for this run. RUN REJECTED.\n";
+            std::cout << " Timing jitter exceeded " << max_time_ms << " for this run. RUN REJECTED.\n";
             continue;
-        } else ( std::abs(refined_lag) < 0.2 ) {
+        } else if ( std::abs(refined_lag) < 0.2 ) {
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } else {
@@ -566,7 +566,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     // 4. Compute average across all runs
     // Get the number of runs directly from the first dimension of the vector
-    size_t num_runs = aligned_ref.size();    
+    num_runs = aligned_ref.size();    
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
