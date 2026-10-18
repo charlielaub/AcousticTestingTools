@@ -35,9 +35,9 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-// Conditionally include ASIO-specific utilities if needed
+// Conditionally include Windows ASIO specific headers to query low-level buffer parameters
 #ifdef _WIN32
-#include "pa_win_asio.h"
+#include "pa_asio.h"
 #endif
 
 // Struct to handle parsed arguments

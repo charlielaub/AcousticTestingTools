@@ -18,7 +18,7 @@
 
 // Conditionally include Windows ASIO specific headers to query low-level buffer parameters
 #ifdef _WIN32
-#include "pa_win_asio.h"
+#include "pa_asio.h"
 #endif
 
 void check_error(PaError err) {
