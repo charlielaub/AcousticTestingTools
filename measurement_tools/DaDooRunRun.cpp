@@ -402,13 +402,6 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 }
 
 
-#define _USE_MATH_DEFINES
-#include <vector>
-#include <cmath>
-#include <algorithm>
-#include <iostream>
-#include <utility>
-
 // Fractional delay filter using a Hann-windowed sinc FIR filter
 std::vector<float> fractional_delay_filter(const std::vector<float>& input, float fractional_shift) {
     size_t size = input.size();
@@ -539,14 +532,14 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         }
 
         std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples\n";
-/*
+
         // 3. Shift both reference and microphone signals using the fractional delay filter
         std::vector<float> shifted_ref = fractional_delay_filter(ref_history[i], refined_lag);
         std::vector<float> shifted_mic = fractional_delay_filter(mic_history[i], refined_lag);
 
         aligned_ref.push_back(shifted_ref);
         aligned_mic.push_back(shifted_mic);
-*/
+
     }
 
     // 4. Compute average across all runs
