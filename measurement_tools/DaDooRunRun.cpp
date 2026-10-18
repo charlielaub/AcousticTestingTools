@@ -785,10 +785,11 @@ int main(int argc, char* argv[]) {
 
     auto [final_avg_ref, final_avg_mic] = perform_acoustic_measurement(args, stimulus);
 
-    // Check if the function returned an empty result indicating failure
-    if (final_avg_ref.first.empty() && final_avg_mic.second.empty()) {
+    // Check if the unpacked vectors are empty (indicating failure)
+    if (final_avg_ref.empty() && final_avg_mic.empty()) {
         std::cerr << "Error: The measurement aborted due to stream failure.\n";
-        return EXIT_FAILURE; // Signals to the operating system that an error occurred
+        Pa_Terminate(); // Don't forget to clean up PortAudio if initialized here
+        return EXIT_FAILURE; 
     }
 
     std::cout << "\n--- Saving Data Files ---\n";
