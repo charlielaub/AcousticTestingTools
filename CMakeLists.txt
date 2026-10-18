@@ -1,12 +1,10 @@
-cmake_minimum_required(VERSION 3.18) # Upgraded from 3.15 to support FetchContent_MakeAvailable
+cmake_minimum_required(VERSION 3.18)
 project(AcousticTestingTools)
 
 # --- Force C++17 globally ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-include(FetchContent)
 
 # Find Eigen3 (Header-only library)
 find_package(Eigen3 REQUIRED)
@@ -15,19 +13,19 @@ find_package(Eigen3 REQUIRED)
 # PortAudio System Configurations
 # -------------------------------------------------------------
 if(WIN32)
-    message(STATUS "Windows detected. Configuring automated audio dependencies via vcpkg...")
+    message(STATUS "Windows detected. Configuring automated audio dependencies...")
 
-    # Configure PortAudio to use the ASIO driver layers natively
+    # 1. Look for the local vcpkg-managed ASIO SDK paths automatically
+    # When using vcpkg's toolchain, asiosdk is globally available out of the box.
     set(PA_USE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
     
-    # PortAudio source code is cloned via FetchContent. 
-    # It dynamically detects the vcpkg-installed "asiosdk" configuration automatically.
-    FetchContent_Declare(
-        portaudio
-        GIT_REPOSITORY "https://github.com"
-        GIT_TAG        "master"
-    )
-    FetchContent_MakeAvailable(portaudio)
+    # 2. Add the local PortAudio source directory directly into our compilation targets
+    if(DEFINED PORTAUDIO_SOURCE_LOCAL_PATH)
+        message(STATUS "Using pre-cloned PortAudio source from: ${PORTAUDIO_SOURCE_LOCAL_PATH}")
+        add_subdirectory("${PORTAUDIO_SOURCE_LOCAL_PATH}" "${CMAKE_BINARY_DIR}/portaudio_build")
+    else()
+        message(FATAL_ERROR "PORTAUDIO_SOURCE_LOCAL_PATH not set! Please pass -DPORTAUDIO_SOURCE_LOCAL_PATH=/path/to/source")
+    endif()
 
 else()
     # Linux / Non-Windows path
@@ -50,7 +48,7 @@ add_executable(DaDooRunRun measurement_tools/DaDooRunRun.cpp)
 target_link_libraries(DaDooRunRun PRIVATE Eigen3::Eigen)
 
 if(WIN32)
-    # Bind directly to the local ASIO compiled target and inject definition
+    # Bind directly to the local project-compiled target and inject definition
     target_link_libraries(DaDooRunRun PRIVATE portaudio)
     target_compile_definitions(DaDooRunRun PRIVATE PA_USE_ASIO=1)
 else()
@@ -74,7 +72,7 @@ add_executable(ProbeAudioDevs measurement_tools/ProbeAudio.cpp)
 target_link_libraries(ProbeAudioDevs PRIVATE Eigen3::Eigen)
 
 if(WIN32)
-    # Bind directly to the local ASIO compiled target and inject definition
+    # Bind directly to the local project-compiled target and inject definition
     target_link_libraries(ProbeAudioDevs PRIVATE portaudio)
     target_compile_definitions(ProbeAudioDevs PRIVATE PA_USE_ASIO=1)
 else()
