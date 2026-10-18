@@ -29,19 +29,15 @@ jobs:
 
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
-        # FIX: Install the official open-source asiosdk port directly via vcpkg
         run: |
           vcpkg install eigen3:x64-windows-static asiosdk:x64-windows-static
 
-      # Note: The manual Download PowerShell block has been safely removed entirely!
-
-       Calvary-name: Configure CMake (Ubuntu)
+      - name: Configure CMake (Ubuntu)
         if: matrix.os == 'ubuntu-24.04'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Configure CMake (Windows)
         if: matrix.os == 'windows-latest'
-        # Removed the manual local path flag. vcpkg handles alignment under the hood automatically.
         run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
       - name: Build Project
