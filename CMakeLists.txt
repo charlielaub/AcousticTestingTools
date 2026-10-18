@@ -15,28 +15,25 @@ find_package(Eigen3 REQUIRED)
 # PortAudio System Configurations
 # -------------------------------------------------------------
 if(WIN32)
-    # Windows GitHub CI Path: Build PortAudio from source with native ASIO support
     message(STATUS "Windows detected. Automating ASIO SDK and PortAudio source compilation...")
 
-    # 1. Direct Git Clone Configuration (Clears extraction / web parsing bugs)
+    # Force clear tracking properties explicitly using separate argument lines
     FetchContent_Declare(
         asiosdk
-        GIT_REPOSITORY https://github.com
-        GIT_TAG        master
+        GIT_REPOSITORY "https://github.com"
+        GIT_TAG        "master"
     )
     FetchContent_MakeAvailable(asiosdk)
-
-    # When using a Git clone, files are placed directly at the root source root
+    
     set(ASIO_SDK_PATH "${asiosdk_SOURCE_DIR}")
 
-    # 2. Configure PortAudio to use the ASIO driver backend
+    # Configure PortAudio dependencies
     set(PA_USE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
-
-    # 3. Pull PortAudio source directly from the official stable branch
+    
     FetchContent_Declare(
         portaudio
-        GIT_REPOSITORY https://github.com
-        GIT_TAG        master
+        GIT_REPOSITORY "https://github.com"
+        GIT_TAG        "master"
     )
     FetchContent_MakeAvailable(portaudio)
 else()
