@@ -669,15 +669,15 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
 
     Pa_StartStream(stream);
     
-#ifdef _WIN32
-    // Windows: Elevate the executing thread to Real-Time Audio priority
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-#else
-    // Linux: Set thread to Real-Time Round-Robin scheduling (requires proper user permissions)
-    struct sched_param param;
-    param.sched_priority = sched_get_priority_max(SCHED_RR);
-    pthread_setschedparam(pthread_self(), SCHED_RR, &param);
-#endif
+// #ifdef _WIN32
+//     // Windows: Elevate the executing thread to Real-Time Audio priority
+//     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+// #else
+//     // Linux: Set thread to Real-Time Round-Robin scheduling (requires proper user permissions)
+//     struct sched_param param;
+//     param.sched_priority = sched_get_priority_max(SCHED_RR);
+//     pthread_setschedparam(pthread_self(), SCHED_RR, &param);
+// #endif
 
     // BEGIN WITH A DAC WARM-UP PERIOD:
     // Streams silence/zeros to wake up DAC and allow the data acquisition 
