@@ -33,15 +33,23 @@ jobs:
         run: |
           vcpkg install eigen3:x64-windows-static
 
+      # --- Native, reliable archive extraction ---
       - name: Download Steinberg ASIO SDK (Windows)
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: |
-          # Download the official zip release directly to the workspace folder
-          Invoke-WebRequest -Uri "https://github.com" -OutFile "asiosdk.zip"
-          # Extract it natively
+          # Use curl.exe directly (built into Windows) to handle GitHub redirects flawlessly (-L follows redirects)
+          curl.exe -L "https://github.com" -o "asiosdk.zip"
+          
+          # Verify the file is not empty before attempting extraction
+          if ((Get-Item "asiosdk.zip").Length -lt 10KB) {
+              Write-Error "Downloaded zip file is too small. The download likely failed or was blocked."
+              exit 1
+          }
+          
+          # Extract the valid zip file
           Expand-Archive -Path "asiosdk.zip" -DestinationPath "."
-          # Rename the extracted folder to a clean, predictable name
+          # Rename the extracted folder to a clean name for CMake
           Rename-Item -Path "asiosdk-2.3.3" -NewName "asiosdk"
 
       - name: Configure CMake (Ubuntu)
