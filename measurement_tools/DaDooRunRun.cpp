@@ -221,15 +221,15 @@ bool check_host_api_and_device(AppArgs& args) {
     if ( args.in_channels[0] == -1 || args.in_channels[1]  == -1 )  {
         std::cout << "\nFATAL ERROR: two input channels were not selected via the command line parameter --input_channels.\n";
     } else {
-        std::cout << "  First input channel number: " << args.in_channels[0] << \n;
-        std::cout << "  Second input channel number: " << args.in_channels[1] << \n;
+        std::cout << "  First input channel number: " << args.in_channels[0] << "\n";
+        std::cout << "  Second input channel number: " << args.in_channels[1] << "\n";
     }
 
     if (args.out_channels[0] == -1) {
         std::cout << "\nFATAL ERROR: two output channels were not selected via the command line parameter --output_channels.\n";
     } else {
-        std::cout << "  First output channel number: " << args.out_channels[0] << \n;
-        std::cout << "  Second output channel number: " << args.out_channels[1] << \n;
+        std::cout << "  First output channel number: " << args.out_channels[0] << "\n";
+        std::cout << "  Second output channel number: " << args.out_channels[1] << "\n";
     }
 
     return true;
