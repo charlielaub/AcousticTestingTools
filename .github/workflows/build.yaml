@@ -30,15 +30,7 @@ jobs:
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          vcpkg install eigen3:x64-windows-static asiosdk:x64-windows-static
-
-      # --- Download External Libraries Before CMake Toolchain Interferences ---
-      - name: Download PortAudio Source (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: |
-          # Natively clone PortAudio outside of CMake's scope to prevent URL stripping
-          git clone --depth 1 https://github.com "${{ github.workspace }}/portaudio-src"
+          vcpkg install portaudio:x64-windows-static eigen3:x64-windows-static
 
       - name: Configure CMake (Ubuntu)
         if: matrix.os == 'ubuntu-24.04'
@@ -46,8 +38,7 @@ jobs:
 
       - name: Configure CMake (Windows)
         if: matrix.os == 'windows-latest'
-        # Pass both pre-downloaded dependency variables straight into the compilation definitions
-        run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DPORTAUDIO_SOURCE_LOCAL_PATH="${{ github.workspace }}/portaudio-src"
+        run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
       - name: Build Project
         run: cmake --build build --config Release
