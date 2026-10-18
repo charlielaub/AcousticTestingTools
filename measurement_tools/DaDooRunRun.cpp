@@ -196,6 +196,7 @@ void write_float32_wav(const std::string& filename, const std::vector<float>& da
 
 // --- Step 1 & 2: Hardware Device Management ---
 bool check_host_api_and_device(AppArgs& args) {
+    std::cout << "\nInitializing and Validating the Audio Device...\n";
     Pa_Initialize();
     int num_apis = Pa_GetHostApiCount();
 
@@ -402,15 +403,19 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 }
 
 
-// Fractional delay filter using a Hann-windowed sinc FIR filter
-std::vector<float> fractional_delay_filter(const std::vector<float>& input, float fractional_shift) {
+// Fractional delay filter with integer shift separation and zero-padding
+std::vector<float> fractional_delay_filter(const std::vector<float>& input, float total_shift) {
     size_t size = input.size();
     std::vector<float> output(size, 0.0f);
 
-    // If shift is extremely close to zero, just return a copy
-    if (std::abs(fractional_shift) < 1e-4f) {
-        return input;
+    if (size == 0) {
+        return output;
     }
+
+    // 1. Separate total shift into integer (gross) and fractional (fine) parts.
+    // std::round keeps the fractional part strictly between -0.5 and +0.5.
+    int integer_shift = static_cast<int>(std::round(total_shift));
+    float fractional_shift = total_shift - static_cast<float>(integer_shift);
 
     const int num_taps = 31; // Must be odd. Higher = better quality, slightly slower.
     const int half_taps = num_taps / 2;
@@ -420,35 +425,40 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
         float weight_sum = 0.0f;
 
         for (int t = -half_taps; t <= half_taps; ++t) {
-            long long sample_idx = static_cast<long long>(i) - t;
+            // 2. Incorporate the integer shift into the sample index lookup
+            long long sample_idx = static_cast<long long>(i) - t - integer_shift;
 
-            if (sample_idx >= 0 && sample_idx < static_cast<long long>(size)) {
-                float x = static_cast<float>(t) - fractional_shift;
-
-                // Sinc function: sin(pi * x) / (pi * x)
-                float sinc_val;
-                if (std::abs(x) < 1e-5f) {
-                    sinc_val = 1.0f;
-                } else {
-                    float pi_x = static_cast<float>(M_PI) * x;
-                    sinc_val = std::sin(pi_x) / pi_x;
-                }
-
-                // Hann Window
-                float normalized_n = static_cast<float>(t + half_taps) / static_cast<float>(num_taps - 1);
-                float hann_window = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * normalized_n));
-
-                float coeff = sinc_val * hann_window;
-                sum += input[sample_idx] * coeff;
-                weight_sum += coeff;
+            // Sinc function: sin(pi * x) / (pi * x)
+            float x = static_cast<float>(t) - fractional_shift;
+            float sinc_val;
+            if (std::abs(x) < 1e-5f) {
+                sinc_val = 1.0f;
+            } else {
+                float pi_x = static_cast<float>(M_PI) * x;
+                sinc_val = std::sin(pi_x) / pi_x;
             }
+
+            // Hann Window
+            float normalized_n = static_cast<float>(t + half_taps) / static_cast<float>(num_taps - 1);
+            float hann_window = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * normalized_n));
+
+            float coeff = sinc_val * hann_window;
+
+            // 3. Apply zero padding for out-of-bounds indices
+            float sample_val = 0.0f;
+            if (sample_idx >= 0 && sample_idx < static_cast<long long>(size)) {
+                sample_val = input[sample_idx];
+            }
+
+            sum += sample_val * coeff;
+            weight_sum += coeff;
         }
 
-        // Normalize weights to preserve amplitude near edges
+        // Normalize weights, defaulting to zero if completely out of bounds
         if (std::abs(weight_sum) > 1e-5f) {
             output[i] = sum / weight_sum;
         } else {
-            output[i] = input[i];
+            output[i] = 0.0f;
         }
     }
 
@@ -536,8 +546,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
         std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.";
         
-        if ( std::abs(refined_lag) <= 0.5 ) {
-            std::cout << " Jitter is less than one-half sample. No jitter adjustment is necessary for this run.\n";
+        if ( std::abs(refined_lag) < 0.2 ) {
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } else {
@@ -724,7 +733,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     }
     #endif
 
-    std::cout << "\nStarting " << args.repetitions << " sequential measurements using " << args.sample_rate << "Hz sampling rate...\n";
+    std::cout << "\nStarting " << args.repetitions << " sequential measurements using " << args.sample_rate << " Hz sampling rate...\n";
     std::cout << "Opening hardware stream with " << pa_in_channels << " inputs and " << pa_out_channels << " outputs.\n";
 
     PaStream* stream = nullptr;
