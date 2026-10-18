@@ -632,10 +632,32 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     #endif
     // -----------------------------------------------------------------
 
-    PaStream* stream;
-    PaError err = Pa_OpenStream(&stream, &inputParameters, &outputParameters, args.sample_rate, block_size, paNoFlag, nullptr, nullptr);
+    PaStream* stream = nullptr;
+
+    // 1. Verify that sample rate and parameters are supported before opening
+    PaError err = Pa_IsFormatSupported(&inputParameters, &outputParameters, args.sample_rate);
+    if (err != paFormatIsSupported) {
+        std::cerr << "PortAudio Error: Format not supported: " << Pa_GetErrorText(err) << "\n";
+        Pa_CloseStream(stream);
+        return {};
+    }
+
+    // 2. Open the stream
+    err = Pa_OpenStream(
+        &stream,
+        &inputParameters,
+        &outputParameters,
+        args.sample_rate,
+        block_size,
+        paNoFlag,
+        nullptr, // Optional callback function (nullptr for blocking/read-write mode)
+        nullptr  // Optional user data pointer passed to the callback
+    );
+
     if (err != paNoError) {
-        std::cerr << "PortAudio Error opening stream: " << Pa_GetErrorText(err) << "\n";
+        std::cerr << "PortAudio Error opening stream: " << Pa_GetErrorText(err) 
+                  << " (Errno: " << err << ")\n";
+        Pa_CloseStream(stream);
         return {};
     }
 
@@ -762,6 +784,12 @@ int main(int argc, char* argv[]) {
     std::vector<float> stimulus = generate_stimulus(args.sample_rate, args.chirp_rate, args.start_freq, args.level);
 
     auto [final_avg_ref, final_avg_mic] = perform_acoustic_measurement(args, stimulus);
+
+    // Check if the function returned an empty result indicating failure
+    if (final_avg_ref.first.empty() && final_avg_mic.second.empty()) {
+        std::cerr << "Error: The measurement aborted due to stream failure.\n";
+        return EXIT_FAILURE; // Signals to the operating system that an error occurred
+    }
 
     std::cout << "\n--- Saving Data Files ---\n";
     if (!args.stimulus_output_file.empty()) {
