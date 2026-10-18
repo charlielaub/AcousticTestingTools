@@ -15,34 +15,28 @@ find_package(Eigen3 REQUIRED)
 # PortAudio System Configurations
 # -------------------------------------------------------------
 if(WIN32)
-    message(STATUS "Windows detected. Automating ASIO SDK and PortAudio source compilation...")
+    message(STATUS "Windows detected. Configuring automated audio dependencies...")
 
-    # 1. Force CMake to ignore the vcpkg toolchain file for this sub-download
-    FetchContent_Declare(
-        asiosdk
-        GIT_REPOSITORY "https://github.com"
-        GIT_TAG        "master"
-        SYSTEM # Tells CMake this is an external system dependency
-        CMAKE_ARGS 
-            "-DCMAKE_TOOLCHAIN_FILE=" # Overrides and clears the toolchain for the sub-build
-    )
-    FetchContent_MakeAvailable(asiosdk)
-    
-    set(ASIO_SDK_PATH "${asiosdk_SOURCE_DIR}")
+    # 1. Use the local ASIO SDK path provided by the GitHub runner
+    if(DEFINED ASIO_SDK_LOCAL_PATH)
+        message(STATUS "Using pre-downloaded ASIO SDK from: ${ASIO_SDK_LOCAL_PATH}")
+        set(ASIO_SDK_PATH "${ASIO_SDK_LOCAL_PATH}")
+    else()
+        # Fallback for local development machines if variable isn't specified
+        message(FATAL_ERROR "ASIO_SDK_LOCAL_PATH not set! Please pass -DASIO_SDK_LOCAL_PATH=/path/to/sdk")
+    endif()
 
-    # 2. Configure PortAudio
+    # 2. Configure PortAudio to use the local ASIO driver layers
     set(PA_USE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
     
-    # Apply the same isolation override to PortAudio to protect its download step
+    # Clone and build PortAudio source directly into the project tree
     FetchContent_Declare(
         portaudio
         GIT_REPOSITORY "https://github.com"
         GIT_TAG        "master"
-        SYSTEM
-        CMAKE_ARGS 
-            "-DCMAKE_TOOLCHAIN_FILE="
     )
     FetchContent_MakeAvailable(portaudio)
+
 else()
     # Linux / Non-Windows path
     find_package(PkgConfig QUIET)

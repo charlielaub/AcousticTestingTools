@@ -29,8 +29,20 @@ jobs:
 
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
+        # REMOVED portaudio from vcpkg install so it does not conflict with our custom ASIO build
         run: |
-          vcpkg install portaudio:x64-windows-static eigen3:x64-windows-static
+          vcpkg install eigen3:x64-windows-static
+
+      - name: Download Steinberg ASIO SDK (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          # Download the official zip release directly to the workspace folder
+          Invoke-WebRequest -Uri "https://github.com" -OutFile "asiosdk.zip"
+          # Extract it natively
+          Expand-Archive -Path "asiosdk.zip" -DestinationPath "."
+          # Rename the extracted folder to a clean, predictable name
+          Rename-Item -Path "asiosdk-2.3.3" -NewName "asiosdk"
 
       - name: Configure CMake (Ubuntu)
         if: matrix.os == 'ubuntu-24.04'
@@ -38,8 +50,8 @@ jobs:
 
       - name: Configure CMake (Windows)
         if: matrix.os == 'windows-latest'
-        # Added the --fresh flag right after the cmake command to clear out the bad cache path
-        run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
+        # Added -DASIO_SDK_LOCAL_PATH to link the runner-downloaded SDK securely
+        run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DASIO_SDK_LOCAL_PATH="${{ github.workspace }}/asiosdk"
 
       - name: Build Project
         run: cmake --build build --config Release
