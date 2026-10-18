@@ -664,6 +664,9 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         return {};
     }
 
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
     Pa_StartStream(stream);
     
 #ifdef _WIN32
