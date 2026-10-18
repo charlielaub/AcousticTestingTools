@@ -15,6 +15,7 @@
 /*                                                                            */
 /* ========================================================================== */
 
+#define NOMINMAX
 #define _USE_MATH_DEFINES
 #include <iostream>
 #include <vector>
@@ -604,10 +605,10 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     const PaDeviceInfo* outputDevInfo = Pa_GetDeviceInfo(args.output_device_idx);
 
     if (inputDevInfo && Pa_GetHostApiInfo(inputDevInfo->hostApi)->type == paASIO) {
-        asioInputInfo.size = sizeof(PaWinAsioStreamInfo);
+        asioInputInfo.size = sizeof(PaAsioStreamInfo);
         asioInputInfo.hostApiType = paASIO;
         asioInputInfo.version = 1;
-        asioInputInfo.flags = paWinAsioUseChannelSelectors;
+        asioInputInfo.flags = paAsioUseChannelSelectors;
         
         // Tells the driver to use direct, sequential hardware mappings
         asioInputInfo.channelSelectors = nullptr; 
@@ -618,10 +619,10 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     }
 
     if (outputDevInfo && Pa_GetHostApiInfo(outputDevInfo->hostApi)->type == paASIO) {
-        asioOutputInfo.size = sizeof(PaWinAsioStreamInfo);
+        asioOutputInfo.size = sizeof(PaAsioStreamInfo);
         asioOutputInfo.hostApiType = paASIO;
         asioOutputInfo.version = 1;
-        asioOutputInfo.flags = paWinAsioUseChannelSelectors;
+        asioOutputInfo.flags = paAsioUseChannelSelectors;
         
         asioOutputInfo.channelSelectors = nullptr;
         outputParameters.hostApiSpecificStreamInfo = &asioOutputInfo;
