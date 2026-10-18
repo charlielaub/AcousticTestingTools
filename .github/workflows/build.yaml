@@ -50,6 +50,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/Windows-programs"
           Copy-Item "build/Release/DaDooRunRun.exe" "dist/Windows-programs/"
           Copy-Item "build/Release/ProbeAudioDevs.exe" "dist/Windows-programs/"
+          Copy-Item "build/Release/portaudio.dll" "dist/Windows-programs/"
           Compress-Archive -Path "dist/Windows-programs" -DestinationPath "dist/Windows-programs.zip"
 
       # --- Package Linux Programs into a .tar.gz ---
