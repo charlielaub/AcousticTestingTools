@@ -196,7 +196,7 @@ void write_float32_wav(const std::string& filename, const std::vector<float>& da
 
 // --- Step 1 & 2: Hardware Device Management ---
 bool check_host_api_and_device(AppArgs& args) {
-    std::cout << "\nInitializing and Validating the Audio Device...\n";
+    std::cout << "\nInitializing and Validating the Audio Device...\n\n";
     Pa_Initialize();
     int num_apis = Pa_GetHostApiCount();
 
@@ -206,7 +206,7 @@ bool check_host_api_and_device(AppArgs& args) {
     }
 
     const PaHostApiInfo* api_info = Pa_GetHostApiInfo(args.api_idx);
-    std::cout << "Driver API: " << api_info->name << "\n";
+    std::cout << "\nDriver API: " << api_info->name << "\n";
 
     int total_devices = Pa_GetDeviceCount();
     std::vector<int> valid_devices;
@@ -544,9 +544,12 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.";
+        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.\n";
         
-        if ( std::abs(refined_lag) < 0.2 ) {
+        if ( refined_lag > max_lag ) {
+            std::cout << " Timing jitter exceeded " << max_time_ms <, " for this run. RUN REJECTED.\n";
+            continue;
+        } else ( std::abs(refined_lag) < 0.2 ) {
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } else {
@@ -562,6 +565,8 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     }
 
     // 4. Compute average across all runs
+    // Get the number of runs directly from the first dimension of the vector
+    size_t num_runs = aligned_ref.size();    
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
@@ -589,7 +594,6 @@ struct MeasurementContext {
     int ch_in0 = 0;
     int ch_in1 = 1;
     
-    // State machine flags and counters
     enum Phase { WARMUP, MEASURING, PAUSING, COMPLETE };
     Phase current_phase = WARMUP;
     
@@ -599,7 +603,6 @@ struct MeasurementContext {
     long long pause_frames_remaining = 0;
     int current_frame = 0;
 };
-
 
 // PortAudio Callback Function (Runs in high-priority audio thread)
 static int measurementCallback(const void* inputBuffer, void* outputBuffer,
@@ -618,6 +621,13 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
         switch (ctx->current_phase) {
             case MeasurementContext::WARMUP:
                 out_sample = 0.0f;
+                // Duplex Pump: Read and discard input data to keep input buffer active
+                if (in) {
+                    volatile float dummy_ref = in[i * ctx->pa_in_channels + ctx->ch_in0];
+                    volatile float dummy_mic = in[i * ctx->pa_in_channels + ctx->ch_in1];
+                    (void)dummy_ref;
+                    (void)dummy_mic;
+                }
                 if (ctx->warmup_frames_remaining > 0) {
                     ctx->warmup_frames_remaining--;
                 }
@@ -633,6 +643,13 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
 
             case MeasurementContext::PAUSING:
                 out_sample = 0.0f;
+                // Duplex Pump during pause: read and discard input data as well
+                if (in) {
+                    volatile float dummy_ref = in[i * ctx->pa_in_channels + ctx->ch_in0];
+                    volatile float dummy_mic = in[i * ctx->pa_in_channels + ctx->ch_in1];
+                    (void)dummy_ref;
+                    (void)dummy_mic;
+                }
                 if (ctx->pause_frames_remaining > 0) {
                     ctx->pause_frames_remaining--;
                 }
@@ -647,7 +664,7 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
         out[i * ctx->pa_out_channels + 0] = out_sample;
         out[i * ctx->pa_out_channels + 1] = out_sample;
 
-        // Read input channels (if currently measuring)
+        // Read input channels (only during active measurement phase)
         if (ctx->current_phase == MeasurementContext::MEASURING) {
             if (ctx->current_frame < ctx->total_samples && in) {
                 ctx->ref_history[ctx->current_rep][ctx->current_frame] = in[i * ctx->pa_in_channels + ctx->ch_in0];
@@ -655,7 +672,6 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
             }
             ctx->current_frame++;
 
-            // Check if this repetition is finished
             if (ctx->current_frame >= ctx->total_samples) {
                 ctx->current_rep++;
                 ctx->current_frame = 0;
@@ -663,7 +679,7 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
                 if (ctx->current_rep >= ctx->total_reps) {
                     ctx->current_phase = MeasurementContext::COMPLETE;
                 } else {
-                    ctx->current_phase = MeasurementContext::PAUSING; // Will be initialized by main thread
+                    ctx->current_phase = MeasurementContext::PAUSING;
                 }
             }
         }
@@ -672,11 +688,9 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
     return (ctx->current_phase == MeasurementContext::COMPLETE) ? paComplete : paContinue;
 }
 
-
 std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(AppArgs& args, const std::vector<float>& stimulus) {
     int total_samples = stimulus.size();
     
-    // 1. Detect Host API type
     const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
     const PaDeviceInfo* outputDevInfo = Pa_GetDeviceInfo(args.output_device_idx);
     bool isAsio = false;
@@ -689,11 +703,9 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     if (pa_out_channels < 2) pa_out_channels = 2;
     if (pa_in_channels < 2)  pa_in_channels  = 2;
 
-    // 2. Allocate histories
     std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
     std::vector<std::vector<float>> mic_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
 
-    // 3. Initialize Context
     MeasurementContext ctx{
         stimulus, ref_history, mic_history,
         total_samples, pa_in_channels, pa_out_channels,
@@ -705,7 +717,6 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         0, 0
     };
 
-    // 4. Configure Stream Parameters
     PaStreamParameters inputParameters{}, outputParameters{};
     inputParameters.device = args.input_device_idx;
     inputParameters.channelCount = pa_in_channels;
@@ -751,31 +762,26 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         return {};
     }
 
-    // 5. Execute Warm-up Phase with Console Output
-    std::cout << "Warming up the output device for " << args.warm_up_delay << " seconds with silence...\n";
+    // Warm-up Phase (now fully duplex - reading and writing simultaneously)
+    std::cout << "Warming up the duplex hardware stream for " << args.warm_up_delay << " seconds...\n";
     while (ctx.warmup_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
         Pa_Sleep(20);
     }
 
-    // 6. Measurement Repetitions Loop with Console Logs & Pauses
     std::random_device rd;
     std::mt19937 gen(rd());
 
     for (int r = 0; r < args.repetitions; ++r) {
-        // Log repetition start
         std::cout << "Capturing measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
 
-        // Switch state to measuring for this repetition
         ctx.current_rep = r;
         ctx.current_frame = 0;
         ctx.current_phase = MeasurementContext::MEASURING;
 
-        // Wait until this repetition completes
         while (ctx.current_phase == MeasurementContext::MEASURING && Pa_IsStreamActive(stream) == 1) {
             Pa_Sleep(20);
         }
 
-        // Handle Inter-measurement Pause (if not the last repetition)
         if (r < args.repetitions - 1) {
             float max_variation = args.mean_wait * 0.10f;
             std::uniform_real_distribution<float> dis(-max_variation, max_variation);
@@ -787,21 +793,17 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
             ctx.pause_frames_remaining = pause_samples;
             ctx.current_phase = MeasurementContext::PAUSING;
 
-            // Wait until the pause silence finishes feeding
             while (ctx.pause_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
                 Pa_Sleep(20);
             }
         }
     }
 
-    // 7. Cleanup
     Pa_StopStream(stream);
     Pa_CloseStream(stream);
 
-    // 8. Return aligned and averaged results
     return align_and_average(ref_history, mic_history, args.sample_rate);
 }
-
 
 
 
