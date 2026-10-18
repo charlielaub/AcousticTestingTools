@@ -110,8 +110,8 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             }
         }
         else if (arg == "--api_idx" && i + 1 < argc) args.api_idx = std::stoi(argv[++i]);
-        else if (arg == "--input_device_idx" && i + 1 < argc) args.device_idx = std::stoi(argv[++i]);
-        else if (arg == "--output_device_idx" && i + 1 < argc) args.device_idx = std::stoi(argv[++i]);
+        else if (arg == "--input_device_idx" && i + 1 < argc) args.input_device_idx = std::stoi(argv[++i]);
+        else if (arg == "--output_device_idx" && i + 1 < argc) args.output_device_idx = std::stoi(argv[++i]);
         else if (arg == "--input_channels" && i + 2 < argc) {
             args.in_channels[0] = std::stoi(argv[++i]);
             args.in_channels[1] = std::stoi(argv[++i]);
@@ -207,9 +207,14 @@ bool select_host_api_and_device(AppArgs& args) {
         return false;
     }
 
-    if (args.device_idx == -1) {
+    if (args.input_device_idx == -1) {
         std::cout << "\nSelect hardware device index: ";
-        std::cin >> args.device_idx;
+        std::cin >> args.input_device_idx;
+    }
+
+    if (args.output_device_idx == -1) {
+        std::cout << "\nSelect hardware device index: ";
+        std::cin >> args.output_device_idx;
     }
 
     const PaDeviceInfo* selected_dev = Pa_GetDeviceInfo(args.device_idx);
@@ -579,13 +584,13 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     inputParameters.device = args.input_device_idx;
     inputParameters.channelCount = pa_in_channels;
     inputParameters.sampleFormat = paFloat32;
-    inputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->defaultLowInputLatency;
+    inputParameters.suggestedLatency = Pa_GetDeviceInfo(args.input_device_idx)->defaultLowInputLatency;
     inputParameters.hostApiSpecificStreamInfo = nullptr;
 
     outputParameters.device = args.output_device_idx;
     outputParameters.channelCount = pa_out_channels;
     outputParameters.sampleFormat = paFloat32;
-    outputParameters.suggestedLatency = Pa_GetDeviceInfo(args.device_idx)->defaultLowOutputLatency;
+    outputParameters.suggestedLatency = Pa_GetDeviceInfo(args.output_device_idx)->defaultLowOutputLatency;
     outputParameters.hostApiSpecificStreamInfo = nullptr;
 
     PaStream* stream;
