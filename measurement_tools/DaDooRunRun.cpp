@@ -555,56 +555,74 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     if (args.sample_rate >= 192000) block_size = 512;
     else if (args.sample_rate >= 88200) block_size = 256;
 
-    int pa_out_channels = 2;
-    int pa_in_channels  = 2;
-
     int total_samples = stimulus.size();
 
+    // 1. Detect Host API type to decide channel layout strategy
+    const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
+    const PaDeviceInfo* outputDevInfo = Pa_GetDeviceInfo(args.output_device_idx);
+
+    bool isAsioInput = false;
+    bool isAsioOutput = false;
+
+    #ifdef _WIN32
+    if (inputDevInfo && Pa_GetHostApiInfo(inputDevInfo->hostApi)->type == paASIO) isAsioInput = true;
+    if (outputDevInfo && Pa_GetHostApiInfo(outputDevInfo->hostApi)->type == paASIO) isAsioOutput = true;
+    #endif
+
+    // 2. Determine channel counts based on API capabilities
+    int pa_out_channels, pa_in_channels;
+    if (isAsioInput && isAsioOutput) {
+        // ASIO uses virtual 2-channel streams mapped via selectors
+        pa_out_channels = 2;
+        pa_in_channels = 2;
+    } else {
+        // Non-ASIO APIs require a wide contiguous stream starting from channel 0
+        pa_out_channels = std::max(args.out_channels[0], args.out_channels[1]) + 1;
+        pa_in_channels  = std::max(args.in_channels[0],  args.in_channels[1])  + 1;
+        if (pa_out_channels < 2) pa_out_channels = 2;
+        if (pa_in_channels < 2)  pa_in_channels  = 2;
+    }
+
+    // 3. Build the output buffer according to the active channel layout
     std::vector<float> output_buffer(total_samples * pa_out_channels, 0.0f);
     for (int i = 0; i < total_samples; ++i) {
         int frame_offset = i * pa_out_channels;
-        // FIX: Always use local stream indices 0 and 1 for custom channel mapping!
-        // Local channel 0 maps to your first target output hardware channel
-        output_buffer[frame_offset + 0] = stimulus[i]; 
-        // Local channel 1 maps to your second target output hardware channel
-        output_buffer[frame_offset + 1] = stimulus[i]; 
+        if (isAsioOutput) {
+            output_buffer[frame_offset + 0] = stimulus[i];
+            output_buffer[frame_offset + 1] = stimulus[i];
+        } else {
+            output_buffer[frame_offset + args.out_channels[0]] = stimulus[i];
+            output_buffer[frame_offset + args.out_channels[1]] = stimulus[i];
+        }
     }
 
     std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples));
     std::vector<std::vector<float>> mic_history(args.repetitions, std::vector<float>(total_samples));
 
     std::cout << "\nStarting " << args.repetitions << " sequential measurements using " << args.sample_rate << "Hz sampling rate...\n";
-    std::cout << "Opening hardware stream with 2 inputs and 2 outputs using custom ASIO channel mapping.\n";
+    std::cout << "Opening hardware stream with " << pa_in_channels << " inputs and " << pa_out_channels << " outputs.\n";
 
     PaStreamParameters inputParameters, outputParameters;
     inputParameters.device = args.input_device_idx;
     inputParameters.channelCount = pa_in_channels;
     inputParameters.sampleFormat = paFloat32;
-    inputParameters.suggestedLatency = Pa_GetDeviceInfo(args.input_device_idx)->defaultHighInputLatency;
+    inputParameters.suggestedLatency = inputDevInfo ? inputDevInfo->defaultHighInputLatency : 0.1;
     inputParameters.hostApiSpecificStreamInfo = nullptr;
 
     outputParameters.device = args.output_device_idx;
     outputParameters.channelCount = pa_out_channels;
     outputParameters.sampleFormat = paFloat32;
-    outputParameters.suggestedLatency = Pa_GetDeviceInfo(args.output_device_idx)->defaultHighOutputLatency;
+    outputParameters.suggestedLatency = outputDevInfo ? outputDevInfo->defaultHighOutputLatency : 0.1;
     outputParameters.hostApiSpecificStreamInfo = nullptr;
 
-    // -----------------------------------------------------------------
-    // Windows ASIO Non-Sequential Channel Selection Setup
-    // -----------------------------------------------------------------
+    // 4. Configure ASIO-specific stream info if applicable
     #ifdef _WIN32
-    PaAsioStreamInfo asioInputInfo;
-    PaAsioStreamInfo asioOutputInfo;
-
-    const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
-    const PaDeviceInfo* outputDevInfo = Pa_GetDeviceInfo(args.output_device_idx);
-
-    // Static arrays to hold the non-sequential channel selectors 
-    // (must remain alive during Pa_OpenStream)
+    static PaAsioStreamInfo asioInputInfo;
+    static PaAsioStreamInfo asioOutputInfo;
     static int inputChannelSelectors[2];
     static int outputChannelSelectors[2];
 
-    if (inputDevInfo && Pa_GetHostApiInfo(inputDevInfo->hostApi)->type == paASIO) {
+    if (isAsioInput) {
         inputChannelSelectors[0] = args.in_channels[0];
         inputChannelSelectors[1] = args.in_channels[1];
 
@@ -612,13 +630,13 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         asioInputInfo.hostApiType = paASIO;
         asioInputInfo.version = 1;
         asioInputInfo.flags = paAsioUseChannelSelectors;
-        asioInputInfo.channelSelectors = inputChannelSelectors; 
+        asioInputInfo.channelSelectors = inputChannelSelectors;
         
         inputParameters.hostApiSpecificStreamInfo = &asioInputInfo;
         inputParameters.suggestedLatency = inputDevInfo->defaultLowInputLatency;
     }
 
-    if (outputDevInfo && Pa_GetHostApiInfo(outputDevInfo->hostApi)->type == paASIO) {
+    if (isAsioOutput) {
         outputChannelSelectors[0] = args.out_channels[0];
         outputChannelSelectors[1] = args.out_channels[1];
 
@@ -632,18 +650,17 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         outputParameters.suggestedLatency = outputDevInfo->defaultLowOutputLatency;
     }
     #endif
-    // -----------------------------------------------------------------
 
     PaStream* stream = nullptr;
 
-    // 1. Verify that sample rate and parameters are supported before opening
+    // 5. Verify format support
     PaError err = Pa_IsFormatSupported(&inputParameters, &outputParameters, args.sample_rate);
     if (err != paFormatIsSupported) {
         std::cerr << "PortAudio Error: Format not supported: " << Pa_GetErrorText(err) << "\n";
         return {};
     }
 
-    // 2. Open the stream
+    // 6. Open the stream
     err = Pa_OpenStream(
         &stream,
         &inputParameters,
@@ -651,8 +668,8 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         args.sample_rate,
         block_size,
         paNoFlag,
-        nullptr, // Callback function (nullptr for blocking/read-write mode)
-        nullptr  // User data pointer
+        nullptr, 
+        nullptr  
     );
 
     if (err != paNoError) {
@@ -667,28 +684,19 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    Pa_StartStream(stream);
-    
-// #ifdef _WIN32
-//     // Windows: Elevate the executing thread to Real-Time Audio priority
-//     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-// #else
-//     // Linux: Set thread to Real-Time Round-Robin scheduling (requires proper user permissions)
-//     struct sched_param param;
-//     param.sched_priority = sched_get_priority_max(SCHED_RR);
-//     pthread_setschedparam(pthread_self(), SCHED_RR, &param);
-// #endif
+    err = Pa_StartStream(stream);
+    if (err != paNoError) {
+        std::cerr << "PortAudio Error starting stream: " << Pa_GetErrorText(err) << "\n";
+        Pa_CloseStream(stream);
+        return {};
+    }
 
-    // BEGIN WITH A DAC WARM-UP PERIOD:
-    // Streams silence/zeros to wake up DAC and allow the data acquisition 
-    // settings to initialize before performing the measurement repetitions
+    // 7. Warm-up Period
     int warm_up_samples = static_cast<int>(args.warm_up_delay * args.sample_rate);
     int warm_up_chunks = warm_up_samples / block_size;
     
     std::cout << "Warming up the output device for " << args.warm_up_delay << " seconds with silence...\n";
     
-    // CRITICAL FIX: To prevent hardware buffer underflows during warm-up,
-    // we must pump both write and read blocks synchronously.
     std::vector<float> warm_up_out_block(block_size * pa_out_channels, 0.0f);
     std::vector<float> warm_up_in_block(block_size * pa_in_channels, 0.0f);
     
@@ -697,22 +705,18 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         PaError r_err = Pa_ReadStream(stream, warm_up_in_block.data(), block_size);
         if (w_err != paNoError || r_err != paNoError) {
             std::cerr << "PortAudio Error during warm-up chunk: " 
-                      << (w_err ? Pa_GetErrorText(w_err) : Pa_GetErrorText(r_err)) << "\n";
+                      << (w_err != paNoError ? Pa_GetErrorText(w_err) : Pa_GetErrorText(r_err)) << "\n";
             break;
         }
     }
-    // -----------------------------------------------------------------
     
+    // 8. Measurement Repetitions Loop
     for (int r = 0; r < args.repetitions; ++r) {
         std::cout << "Capturing measurement #" << r + 1 << " of " << args.repetitions << "...\n";
 
-        // Pre-allocate memory outside the hot-loop to prevent heap fragmentation
         std::vector<float> input_buffer(total_samples * pa_in_channels, 0.0f);
         int chunks = total_samples / block_size;
 
-        // CRITICAL FIX: Optimized Full-Duplex I/O Loop
-        // We write the upcoming output frame *immediately* followed by reading the incoming frame.
-        // On native low-latency drivers like ASIO, this ensures the hardware buffers stay perfectly balanced.
         bool stream_fault = false;
         for (int c = 0; c < chunks; ++c) {
             int out_offset = c * block_size * pa_out_channels;
@@ -723,7 +727,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
 
             if (write_err != paNoError || read_err != paNoError) {
                 std::cerr << "Hardware Streaming Error in loop: " 
-                          << (write_err ? Pa_GetErrorText(write_err) : Pa_GetErrorText(read_err)) << "\n";
+                          << (write_err != paNoError ? Pa_GetErrorText(write_err) : Pa_GetErrorText(read_err)) << "\n";
                 stream_fault = true;
                 break;
             }
@@ -731,10 +735,9 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         
         if (stream_fault) continue;
 
-        // Optimized Software Demultiplexing
-        // Cache variables to allow the compiler to auto-vectorize this loop safely
-        const int ch_in0 = args.in_channels[0];
-        const int ch_in1 = args.in_channels[1];
+        // 9. Demultiplexing input channels
+        const int ch_in0 = isAsioInput ? 0 : args.in_channels[0];
+        const int ch_in1 = isAsioInput ? 1 : args.in_channels[1];
         auto& current_ref = ref_history[r];
         auto& current_mic = mic_history[r];
 
@@ -744,7 +747,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
             current_mic[i] = input_buffer[frame_offset + ch_in1];
         }
 
-        // Inter-measurement pause (feed stream silence chunks to avoid buffer underruns)
+        // 10. Inter-measurement pause
         if (r < args.repetitions - 1) {
             float max_variation = args.mean_wait * 0.10f;
             std::uniform_real_distribution<float> dis(-max_variation, max_variation);
@@ -764,7 +767,7 @@ std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(A
         }
     }
 
-    // Clean stop sequence to let the hardware drivers flush smoothly
+    // 11. Cleanup
     Pa_StopStream(stream);
     Pa_CloseStream(stream);
 
