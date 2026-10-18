@@ -187,7 +187,7 @@ bool select_host_api_and_device(AppArgs& args) {
     }
 
     const PaHostApiInfo* api_info = Pa_GetHostApiInfo(args.api_idx);
-    std::cout << "Active Driver API: " << api_info->name << "\n";
+    std::cout << "Driver API: " << api_info->name << "\n";
 
     int total_devices = Pa_GetDeviceCount();
     std::vector<int> valid_devices;
@@ -217,16 +217,8 @@ bool select_host_api_and_device(AppArgs& args) {
         std::cin >> args.output_device_idx;
     }
 
-    const PaDeviceInfo* selected_dev = Pa_GetDeviceInfo(args.device_idx);
-    std::cout << "Active Device: " << selected_dev->name << "\n";
-
-    if (args.out_channels[0] == -1) {
-        std::cout << "\n--- [Step 3] Configure Output Channels (Available: 0 to " << selected_dev->maxOutputChannels - 1 << ") ---\n";
-        std::cout << "Enter physical output channel index for Stimulus: ";
-        std::cin >> args.out_channels[0];
-        std::cout << "Enter secondary physical output channel index: ";
-        std::cin >> args.out_channels[1];
-    }
+    const PaDeviceInfo* selected_dev = Pa_GetDeviceInfo(args.input_device_idx);
+    std::cout << "Input Device: " << selected_dev->name << "\n";
 
     if (args.in_channels[0] == -1) {
         std::cout << "\n--- [Step 4] Configure Input Channels (Available: 0 to " << selected_dev->maxInputChannels - 1 << ") ---\n";
@@ -234,6 +226,17 @@ bool select_host_api_and_device(AppArgs& args) {
         std::cin >> args.in_channels[0];
         std::cout << "Enter physical input channel index that will record the Microphone signal: ";
         std::cin >> args.in_channels[1];
+    }
+
+    const PaDeviceInfo* selected_dev = Pa_GetDeviceInfo(args.output_device_idx);
+    std::cout << "Output Device: " << selected_dev->name << "\n";
+
+    if (args.out_channels[0] == -1) {
+        std::cout << "\n--- [Step 3] Configure Output Channels (Available: 0 to " << selected_dev->maxOutputChannels - 1 << ") ---\n";
+        std::cout << "Enter physical output channel index for Stimulus: ";
+        std::cin >> args.out_channels[0];
+        std::cout << "Enter secondary physical output channel index: ";
+        std::cin >> args.out_channels[1];
     }
 
     return true;
