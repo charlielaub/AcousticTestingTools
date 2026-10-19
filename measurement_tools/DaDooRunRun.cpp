@@ -501,7 +501,6 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 }
 
 
-
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
     const std::vector<std::vector<float>>& mic_history,
@@ -519,10 +518,11 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     // Convert time window to number of samples based on sample rate
     int max_lag = static_cast<int>(std::round((alignment_window_msec / 1000.0f) * sample_rate));
+    max_lag += baseline_delay_samples;
 
     if (num_runs > 0) {
         std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment against Pure Stimulus ---\n";
-        std::cout << "Max lag window: " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
+        std::cout << "Max lag window: " << alignment_window_msec + 1000.0f*baseline_delay_samples/sample_rate << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
     // Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
@@ -544,7 +544,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             float ref_i_energy = 0.0f;
 
             for (size_t n = 0; n < signal_size; ++n) {
-                long long stim_idx = static_cast<long long>(n) + lag + baseline_delay_samples;
+                long long stim_idx = static_cast<long long>(n) + lag - baseline_delay_samples;
                 
                 if (stim_idx >= 0 && stim_idx < static_cast<long long>(pure_stimulus.size())) {
                     float val_stim = pure_stimulus[stim_idx];
@@ -634,7 +634,6 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     return {avg_ref, avg_mic};
 }
-
 
 
 // Context structure to manage state inside the PortAudio callback
