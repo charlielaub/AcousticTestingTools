@@ -50,6 +50,7 @@ struct AppArgs {
     float chirp_rate = 2.0f;
     float start_freq = 1.0f;
     int repetitions = 1;
+    float alignment_window = 5.0;
     float warm_up_delay = 3.0f;
     float mean_wait = 1.0f;
     float level = -6.0f; // Default level in dB (must be <= 0.0)
@@ -90,7 +91,7 @@ void show_help_info(const char* prog_name) {
               << "  --chirp_rate <float>            Chirp rate in seconds per decade of frequency (default: 2.0)\n"
               << "  --start_freq <float>            Start frequency in Hz (default: 1.0)\n"
               << "  --repetitions <int>             Number of measurement runs (default: 1)\n"
-              << "  --alignment_window <float>      Cross-Correlation Alignment Window in milliseconds (default: 5)\n"
+              << "  --alignment_window <float>      Cross-Correlation Alignment Window in milliseconds (default: 5.0)\n"
               << "  --warm_up_delay <float>         Length of DAC warm-up delay in seconds (default: 3.0)\n"
               << "  --mean_wait <float>             Average pause between runs in seconds (default: 3.0)\n"
               << "  --api_idx <int>                 PortAudio host API index\n"
