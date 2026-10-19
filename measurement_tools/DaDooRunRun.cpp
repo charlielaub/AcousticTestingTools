@@ -69,6 +69,34 @@ struct AppArgs {
     int output_device_idx = -1;
     int out_channels[2] = {-1, -1};
     int in_channels[2] = {-1, -1};
+
+    // Helper method to print all parameters with aligned colons
+    void print() const {
+        const int name_width = 20; // Matches length of "stimulus_output_file"
+
+        std::cout << "\n";
+        std::cout << "============ Program Parameters ============\n";
+        std::cout << std::right; // Ensure right-alignment
+        
+        std::cout << std::setw(name_width) << "mic_output_file"      << " : " << mic_output_file << "\n";
+        std::cout << std::setw(name_width) << "stimulus_output_file" << " : " << (stimulus_output_file.empty() ? "(empty)" : stimulus_output_file) << "\n";
+        std::cout << std::setw(name_width) << "sample_rate"          << " : " << sample_rate << "\n";
+        std::cout << std::setw(name_width) << "chirp_rate"           << " : " << chirp_rate << "\n";
+        std::cout << std::setw(name_width) << "start_freq"           << " : " << start_freq << "\n";
+        std::cout << std::setw(name_width) << "repetitions"          << " : " << repetitions << "\n";
+        std::cout << std::setw(name_width) << "alignment_window"     << " : " << alignment_window << "\n";
+        std::cout << std::setw(name_width) << "warm_up_delay"        << " : " << warm_up_delay << "\n";
+        std::cout << std::setw(name_width) << "mean_wait"            << " : " << mean_wait << "\n";
+        std::cout << std::setw(name_width) << "level"                << " : " << level << " dB\n";
+        std::cout << std::setw(name_width) << "api_idx"              << " : " << api_idx << "\n";
+        std::cout << std::setw(name_width) << "input_device_idx"     << " : " << input_device_idx << "\n";
+        std::cout << std::setw(name_width) << "output_device_idx"    << " : " << output_device_idx << "\n";
+        std::cout << std::setw(name_width) << "out_channels"         << " : [" << out_channels[0] << ", " << out_channels[1] << "]\n";
+        std::cout << std::setw(name_width) << "in_channels"          << " : [" << in_channels[0] << ", " << in_channels[1] << "]\n";
+        
+        std::cout << "============================================\n";
+        std::cout << "\n";
+    }
 };
 
 
@@ -1041,6 +1069,9 @@ int main(int argc, char* argv[]) {
     if (!check_host_api_and_device(args)) {
         return -1;
     }
+
+    // Print all program parameters to the screen
+    args.print();
 
     // Generate the stimulus
     std::vector<float> stimulus = generate_stimulus(
