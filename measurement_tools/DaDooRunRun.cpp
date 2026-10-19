@@ -519,7 +519,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     if (num_runs > 1) {
         std::cout << "\n--- Performing Measurement Alignment & Quality Control ---\n";
-        std::cout << "Max lag window: " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
+        std::cout << "Using an alignment window of " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
     // 3. Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
@@ -582,24 +582,25 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag 
-                  << " samples (NCC score: " << max_corr << ").\n";
+        std::cout << "RUN " << i + 1 << " has a timing offset of " << refined_lag 
+                  << " samples and a quality score of " << max_corr << ").\n";
         
         if (std::abs(refined_lag) > lag_threshold) {
-            std::cout << " -> Timing jitter exceeded " << alignment_window_msec << " ms. RUN REJECTED.\n";
+            std::cout << "  --> The timing error exceeded " << alignment_window_msec << " ms. RUN REJECTED.\n";
             continue;
         } 
         else if (max_corr < min_ncc_threshold) {
-            std::cout << " -> Shape correlation (" << max_corr << ") below threshold (" 
+            std::cout << "  --> The quality score is below the cutoff of (" 
                       << min_ncc_threshold << "). RUN REJECTED (likely corrupted).\n";
             continue;
         } 
         else if (std::abs(refined_lag) < 0.2f) {
+            std::cout << "  --> RUN ACCEPTED for averaging. \n";
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } 
         else {
-            std::cout << " -> Correcting timing jitter for this run.\n";
+            std::cout << "  --> Correcting the timing error for this run. RUN ACCEPTED for averaging. \n";
             shifted_ref = fractional_delay_filter(ref_history[i], -refined_lag);
             shifted_mic = fractional_delay_filter(mic_history[i], -refined_lag);
         }
@@ -1016,7 +1017,6 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
         return {};
     }
 
-    std::cout << "Measurement complete and successfully averaged!\n";
     return {avg_ref, avg_mic, true};
 }
 
@@ -1051,11 +1051,7 @@ int main(int argc, char* argv[]) {
     );
     
     // 3. Check for success and proceed
-    if (success) {
-        std::cout << "Averaged measurement complete!\n";
-        // Perform your frequency response / impulse response calculations here using:
-        // final_avg_ref and final_avg_mic
-    } else {
+    if (! success) {
         std::cerr << "Measurement session failed.\n";
         return 1;
     }
