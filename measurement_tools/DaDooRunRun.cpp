@@ -80,21 +80,21 @@ struct AppArgs {
         std::cout << "============ Program Parameters ============\n";
         std::cout << std::right; // Ensure right-alignment
         
-        std::cout << std::setw(name_width) << "mic_output_file"      << " : " << mic_output_file << "\n";
-        std::cout << std::setw(name_width) << "stimulus_output_file" << " : " << (stimulus_output_file.empty() ? "(none)" : stimulus_output_file) << "\n";
-        std::cout << std::setw(name_width) << "sample_rate"          << " : " << sample_rate << " Hz\n";
-        std::cout << std::setw(name_width) << "chirp_rate"           << " : " << chirp_rate << " seconds per decade Hz\n";
-        std::cout << std::setw(name_width) << "start_freq"           << " : " << start_freq << " Hz\n";
+        std::cout << std::setw(name_width) << "mic output file"      << " : " << mic_output_file << "\n";
+        std::cout << std::setw(name_width) << "stimulus output file" << " : " << (stimulus_output_file.empty() ? "(none)" : stimulus_output_file) << "\n";
+        std::cout << std::setw(name_width) << "sample rate"          << " : " << sample_rate << " Hz\n";
+        std::cout << std::setw(name_width) << "chirp rate"           << " : " << chirp_rate << " seconds per decade Hz\n";
+        std::cout << std::setw(name_width) << "start freq"           << " : " << start_freq << " Hz\n";
         std::cout << std::setw(name_width) << "repetitions"          << " : " << repetitions << "\n";
-        std::cout << std::setw(name_width) << "alignment_window"     << " : " << alignment_window << " milliseconds\n";
-        std::cout << std::setw(name_width) << "warm_up_delay"        << " : " << warm_up_delay << " seconds\n";
-        std::cout << std::setw(name_width) << "mean_wait"            << " : " << mean_wait << " seconds\n";
+        std::cout << std::setw(name_width) << "alignment window"     << " : " << alignment_window << " milliseconds\n";
+        std::cout << std::setw(name_width) << "warm up delay"        << " : " << warm_up_delay << " seconds\n";
+        std::cout << std::setw(name_width) << "mean wait"            << " : " << mean_wait << " seconds\n";
         std::cout << std::setw(name_width) << "level"                << " : " << level << " dB\n";
-        std::cout << std::setw(name_width) << "api_idx"              << " : " << api_idx << "\n";
-        std::cout << std::setw(name_width) << "input_device_idx"     << " : " << input_device_idx << "\n";
-        std::cout << std::setw(name_width) << "output_device_idx"    << " : " << output_device_idx << "\n";
-        std::cout << std::setw(name_width) << "out_channels"         << " : [" << out_channels[0] << ", " << out_channels[1] << "]\n";
-        std::cout << std::setw(name_width) << "in_channels"          << " : [" << in_channels[0] << ", " << in_channels[1] << "]\n";
+        std::cout << std::setw(name_width) << "api idx"              << " : " << api_idx << "\n";
+        std::cout << std::setw(name_width) << "input device idx"     << " : " << input_device_idx << "\n";
+        std::cout << std::setw(name_width) << "output device idx"    << " : " << output_device_idx << "\n";
+        std::cout << std::setw(name_width) << "output channels"      << " : [" << out_channels[0] << ", " << out_channels[1] << "]\n";
+        std::cout << std::setw(name_width) << "input channels"       << " : [" << in_channels[0] << ", " << in_channels[1] << "]\n";
         
         std::cout << "============================================\n";
         std::cout << "\n";
@@ -551,7 +551,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::cout << "\n--- Performing Measurement Alignment & Quality Control ---\n";
         std::cout << "Searching within a window of +/- " << alignment_window_msec 
             << " ms (" << max_lag << " samples at " << sample_rate 
-            << " Hz)\n for best correlation with RUN 1 data.";
+            << " Hz) for the best correlation with RUN 1 data:\n\n";
     }
 
     // Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
@@ -643,9 +643,9 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     // Compute average using all valid runs
     if ( ref_history.size() > 1 ) {
-        std::cout << "\nPerforming Time-Synchronous Averaging, using " 
+        std::cout << "\nPerforming Time-Synchronous Measurement Averaging, using " 
             << num_runs << " out of " << ref_history.size() 
-            << " measurement runs...\n";
+            << " measurement runs.\n";
     }
     num_runs = aligned_ref.size();
     std::vector<float> avg_ref(signal_size, 0.0f);
@@ -1068,12 +1068,12 @@ int main(int argc, char* argv[]) {
 
     AppArgs args = parse_arguments(argc, argv);
 
+    // Print all program parameters to the screen
+    args.print();
+
     if (!check_host_api_and_device(args)) {
         return -1;
     }
-
-    // Print all program parameters to the screen
-    args.print();
 
     // Generate the stimulus
     std::vector<float> stimulus = generate_stimulus(
