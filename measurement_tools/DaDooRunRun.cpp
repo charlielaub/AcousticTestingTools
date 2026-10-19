@@ -90,6 +90,7 @@ void show_help_info(const char* prog_name) {
               << "  --chirp_rate <float>            Chirp rate in seconds per decade of frequency (default: 2.0)\n"
               << "  --start_freq <float>            Start frequency in Hz (default: 1.0)\n"
               << "  --repetitions <int>             Number of measurement runs (default: 1)\n"
+              << "  --alignment_window <float>      Cross-Correlation Alignment Window in milliseconds (default: 5)\n"
               << "  --warm_up_delay <float>         Length of DAC warm-up delay in seconds (default: 3.0)\n"
               << "  --mean_wait <float>             Average pause between runs in seconds (default: 3.0)\n"
               << "  --api_idx <int>                 PortAudio host API index\n"
@@ -120,6 +121,7 @@ AppArgs parse_arguments(int argc, char* argv[]) {
         else if (arg == "--chirp_rate" && i + 1 < argc) args.chirp_rate = std::stof(argv[++i]);
         else if (arg == "--start_freq" && i + 1 < argc) args.start_freq = std::stof(argv[++i]);
         else if (arg == "--repetitions" && i + 1 < argc) args.repetitions = std::stoi(argv[++i]);
+        else if (arg == "--alignment_window" && i + 1 < argc) args.alignment_window = std::stoi(argv[++i]);
         else if (arg == "--warm_up_delay" && i + 1 < argc) args.warm_up_delay = std::stoi(argv[++i]);
         else if (arg == "--mean_wait" && i + 1 < argc) args.mean_wait = std::stof(argv[++i]);
         else if (arg == "--level" && i + 1 < argc) {
@@ -464,7 +466,8 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& mic_history,
     const std::vector<float>& pure_stimulus,
     int baseline_delay_samples,
-    float sample_rate) 
+    float sample_rate,
+    float alignment_window_msec) 
 {
     size_t num_runs = ref_history.size();
     if (num_runs == 0) return {};
@@ -473,15 +476,12 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     std::vector<std::vector<float>> aligned_ref = {ref_history[0]};
     std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
 
-    // Hardcoded local static value for max time lag in milliseconds
-    static constexpr float max_time_ms = 30.0f;
-
     // Convert time window to number of samples based on sample rate
-    int max_lag = static_cast<int>(std::round((max_time_ms / 1000.0f) * sample_rate));
+    int max_lag = static_cast<int>(std::round((alignment_window_msec / 1000.0f) * sample_rate));
 
     if (num_runs > 1) {
         std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment & Quality Filtering ---\n";
-        std::cout << "Max lag window: " << max_time_ms << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
+        std::cout << "Max lag window: " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
     // 3. Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
@@ -548,7 +548,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
                   << " samples (NCC score: " << max_corr << ").\n";
         
         if (std::abs(refined_lag) > lag_threshold) {
-            std::cout << " -> Timing jitter exceeded " << max_time_ms << " ms. RUN REJECTED.\n";
+            std::cout << " -> Timing jitter exceeded " << alignment_window_msec << " ms. RUN REJECTED.\n";
             continue;
         } 
         else if (max_corr < min_ncc_threshold) {
@@ -914,7 +914,7 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     }
 
     // 2. Probe Phase Transition
-    std::cout << "Probing baseline hardware latency...\n";
+    std::cout << "\nProbing baseline hardware latency...\n";
     ctx.current_frame = 0;
     ctx.current_phase = MeasurementContext::PROBING;
 
@@ -924,12 +924,14 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
 
     // Calculate baseline hardware delay using the probe loopback reference
     int baseline_delay_samples = estimate_baseline_delay(probe_ref_record, pure_probe);
-    std::cout << "-> Baseline Hardware Delay Established: " << baseline_delay_samples << " samples.\n";
-
+    std::cout << "-> Baseline Hardware Delay Established: " 
+        << 1000.0f * baseline_delay_samples / args.sample_rate 
+        << " milliseconds (" << baseline_delay_samples << " samples).\n\n";
     std::random_device rd;
     std::mt19937 gen(rd());
 
     // 3. Repetitions Loop with Duplex Pauses
+    std::cout << "Begin Collecting Data:\n\n";
     for (int r = 0; r < args.repetitions; ++r) {
         std::cout << "Capturing measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
 
@@ -968,7 +970,8 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
         mic_history, 
         stimulus, 
         baseline_delay_samples, 
-        args.sample_rate
+        args.sample_rate,
+        args.alignment_window
     );
 
     if (avg_ref.empty() || avg_mic.empty()) {
