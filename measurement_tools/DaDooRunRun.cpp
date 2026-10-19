@@ -462,6 +462,8 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
     const std::vector<std::vector<float>>& mic_history,
+    const std::vector<float>& pure_stimulus,
+    int baseline_delay_samples,
     float sample_rate) 
 {
     size_t num_runs = ref_history.size();
@@ -1004,11 +1006,10 @@ int main(int argc, char* argv[]) {
 
     // 2. Call perform_acoustic_measurement correctly using structured binding for all 3 return fields
     auto [final_avg_ref, final_avg_mic, success] = perform_acoustic_measurement(
-        stimulus, 
-        args.sample_rate, 
-        args.repetitions
+        args, 
+        stimulus
     );
-
+    
     // 3. Check for success and proceed
     if (success) {
         std::cout << "Averaged measurement complete!\n";
