@@ -806,7 +806,7 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
         out[i * ctx->pa_out_channels + 0] = out_sample;
         out[i * ctx->pa_out_channels + 1] = out_sample;
 
-        // Read input channels during Probing phase
+        // Read input channels based strictly on the phase active at this specific frame
         if (ctx->current_phase == MeasurementContext::PROBING) {
             size_t record_idx = static_cast<size_t>(ctx->current_frame);
             if (record_idx < ctx->probe_ref_record.size() && in) {
@@ -815,14 +815,14 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
             }
             ctx->current_frame++;
 
-            // Total probe recording length = probe stimulus + 50ms tail padding for latency
+            // If probe recording finishes mid-buffer, zero out remainder of buffer and transition cleanly
             if (ctx->current_frame >= static_cast<int>(ctx->probe_ref_record.size())) {
                 ctx->current_phase = MeasurementContext::MEASURING;
                 ctx->current_frame = 0;
                 ctx->current_rep = 0;
+                break; // Exit the loop early so remaining buffer frames don't bleed into MEASURING
             }
         }
-        // Read input channels during Active Measurement phase
         else if (ctx->current_phase == MeasurementContext::MEASURING) {
             if (ctx->current_frame < ctx->total_samples && in) {
                 ctx->ref_history[ctx->current_rep][ctx->current_frame] = in[i * ctx->pa_in_channels + ctx->ch_in0];
@@ -839,6 +839,7 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
                 } else {
                     ctx->current_phase = MeasurementContext::PAUSING;
                 }
+                break; // Exit early on phase completion
             }
         }
     }
