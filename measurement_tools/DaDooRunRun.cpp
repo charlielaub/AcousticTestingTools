@@ -18,6 +18,8 @@
 #define NOMINMAX
 #define _USE_MATH_DEFINES
 #include <iostream>
+#include <string>
+#include <iomanip>
 #include <vector>
 #include <cmath>
 #include <string>
@@ -79,14 +81,14 @@ struct AppArgs {
         std::cout << std::right; // Ensure right-alignment
         
         std::cout << std::setw(name_width) << "mic_output_file"      << " : " << mic_output_file << "\n";
-        std::cout << std::setw(name_width) << "stimulus_output_file" << " : " << (stimulus_output_file.empty() ? "(empty)" : stimulus_output_file) << "\n";
-        std::cout << std::setw(name_width) << "sample_rate"          << " : " << sample_rate << "\n";
-        std::cout << std::setw(name_width) << "chirp_rate"           << " : " << chirp_rate << "\n";
-        std::cout << std::setw(name_width) << "start_freq"           << " : " << start_freq << "\n";
+        std::cout << std::setw(name_width) << "stimulus_output_file" << " : " << (stimulus_output_file.empty() ? "(none)" : stimulus_output_file) << "\n";
+        std::cout << std::setw(name_width) << "sample_rate"          << " : " << sample_rate << " Hz\n";
+        std::cout << std::setw(name_width) << "chirp_rate"           << " : " << chirp_rate << " seconds per decade Hz\n";
+        std::cout << std::setw(name_width) << "start_freq"           << " : " << start_freq << " Hz\n";
         std::cout << std::setw(name_width) << "repetitions"          << " : " << repetitions << "\n";
-        std::cout << std::setw(name_width) << "alignment_window"     << " : " << alignment_window << "\n";
-        std::cout << std::setw(name_width) << "warm_up_delay"        << " : " << warm_up_delay << "\n";
-        std::cout << std::setw(name_width) << "mean_wait"            << " : " << mean_wait << "\n";
+        std::cout << std::setw(name_width) << "alignment_window"     << " : " << alignment_window << " milliseconds\n";
+        std::cout << std::setw(name_width) << "warm_up_delay"        << " : " << warm_up_delay << " seconds\n";
+        std::cout << std::setw(name_width) << "mean_wait"            << " : " << mean_wait << " seconds\n";
         std::cout << std::setw(name_width) << "level"                << " : " << level << " dB\n";
         std::cout << std::setw(name_width) << "api_idx"              << " : " << api_idx << "\n";
         std::cout << std::setw(name_width) << "input_device_idx"     << " : " << input_device_idx << "\n";
