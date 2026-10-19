@@ -32,15 +32,34 @@ void check_error(PaError err) {
     }
 }
 
-// Helper function to extract a clean base name from Windows device strings
-// e.g., "Out 3-4 (MOTU M Series)" -> "MOTU M Series"
-std::string get_base_device_name(const std::string& raw_name) {
-    size_t open_paren = raw_name.rfind('(');
-    size_t close_paren = raw_name.rfind(')');
-    if (open_paren != std::string::npos && close_paren != std::string::npos && close_paren > open_paren) {
-        return raw_name.substr(open_paren + 1, close_paren - open_paren - 1);
+// Helper function to extract a clean base name depending on the platform/API convention
+// Windows: "Out 3-4 (MOTU M Series)" -> "MOTU M Series" (Name is inside parentheses)
+// Linux ALSA: "HDA Intel PCH: ALC892 Analog (hw:0,0)" -> "HDA Intel PCH: ALC892 Analog" (Name is before parentheses)
+std::string get_base_device_name(const std::string& raw_name, bool is_alsa) {
+    if (is_alsa) {
+        size_t open_paren = raw_name.find("(hw:");
+        if (open_paren == std::string::npos) {
+            open_paren = raw_name.rfind('(');
+        }
+        if (open_paren != std::string::npos && open_paren > 0) {
+            std::string base = raw_name.substr(0, open_paren);
+            // Trim trailing whitespace
+            while (!base.empty() && base.back() == ' ') {
+                base.pop_back();
+            }
+            if (!base.empty()) {
+                return base;
+            }
+        }
+        return raw_name;
+    } else {
+        size_t open_paren = raw_name.rfind('(');
+        size_t close_paren = raw_name.rfind(')');
+        if (open_paren != std::string::npos && close_paren != std::string::npos && close_paren > open_paren) {
+            return raw_name.substr(open_paren + 1, close_paren - open_paren - 1);
+        }
+        return raw_name;
     }
-    return raw_name; // Fallback if no parentheses found
 }
 
 // Helper function to print detailed diagnostics for a specific device index
@@ -161,6 +180,8 @@ int main(int argc, char* argv[]) {
         }
 
         const PaHostApiInfo* chosen_api_info = Pa_GetHostApiInfo(chosen_api);
+        bool is_alsa = (chosen_api_info->type == paALSA);
+
         std::cout << "\n[Interactive Mode] Grouped Hardware Names under API: " << chosen_api_info->name << "\n";
         std::cout << "---------------------------------------------------------\n";
 
@@ -171,7 +192,7 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < total_devices; ++i) {
             const PaDeviceInfo* dev_info = Pa_GetDeviceInfo(i);
             if (dev_info && dev_info->hostApi == chosen_api) {
-                std::string base_name = get_base_device_name(dev_info->name);
+                std::string base_name = get_base_device_name(dev_info->name, is_alsa);
                 if (base_name_to_indices.find(base_name) == base_name_to_indices.end()) {
                     unique_base_names.push_back(base_name);
                 }
