@@ -482,6 +482,12 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::cout << "Max lag window: " << max_time_ms << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
+    // 3. Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
+    static constexpr float min_ncc_threshold = 0.95f;
+    int lag_threshold;
+    lag_threshold = static_cast<int>(0.95f * max_lag);
+    
+
     std::vector<float> shifted_ref;
     std::vector<float> shifted_mic;
 
@@ -539,10 +545,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag 
                   << " samples (NCC score: " << max_corr << ").\n";
         
-        // 3. Quality & Outlier Rejection Checks (Threshold set to 0.95)
-        static constexpr float min_ncc_threshold = 0.95f;
-
-        if (std::abs(refined_lag) > static_cast<float>(max_lag)) {
+        if (std::abs(refined_lag) > lag_threshold) {
             std::cout << " -> Timing jitter exceeded " << max_time_ms << " ms. RUN REJECTED.\n";
             continue;
         } 
@@ -605,6 +608,7 @@ struct MeasurementContext {
     long long pause_frames_remaining = 0;
     int current_frame = 0;
 };
+
 
 // PortAudio Callback Function (Runs in high-priority audio thread)
 static int measurementCallback(const void* inputBuffer, void* outputBuffer,
@@ -690,121 +694,199 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
     return (ctx->current_phase == MeasurementContext::COMPLETE) ? paComplete : paContinue;
 }
 
-std::pair<std::vector<float>, std::vector<float>> perform_acoustic_measurement(AppArgs& args, const std::vector<float>& stimulus) {
-    int total_samples = stimulus.size();
+
+
+// Generates a short Hann-windowed sinc pulse for latency probing
+std::vector<float> generate_probe_signal(float sample_rate, float duration_ms = 5.0f) {
+    int num_samples = static_cast<int>(std::round((duration_ms / 1000.0f) * sample_rate));
+    if (num_samples % 2 == 0) num_samples += 1; // Ensure odd length for symmetry
     
-    const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
-    const PaDeviceInfo* outputDevInfo = Pa_GetDeviceInfo(args.output_device_idx);
-    bool isAsio = false;
-    #ifdef _WIN32
-    if (inputDevInfo && Pa_GetHostApiInfo(inputDevInfo->hostApi)->type == paASIO) isAsio = true;
-    #endif
+    std::vector<float> probe(num_samples, 0.0f);
+    int center = num_samples / 2;
+    float cutoff_freq = 0.25f; // Fraction of Nyquist
 
-    int pa_out_channels = isAsio ? 2 : std::max(args.out_channels[0], args.out_channels[1]) + 1;
-    int pa_in_channels  = isAsio ? 2 : std::max(args.in_channels[0],  args.in_channels[1])  + 1;
-    if (pa_out_channels < 2) pa_out_channels = 2;
-    if (pa_in_channels < 2)  pa_in_channels  = 2;
-
-    std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
-    std::vector<std::vector<float>> mic_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
-
-    MeasurementContext ctx{
-        stimulus, ref_history, mic_history,
-        total_samples, pa_in_channels, pa_out_channels,
-        isAsio ? 0 : args.in_channels[0],
-        isAsio ? 1 : args.in_channels[1],
-        MeasurementContext::WARMUP,
-        0, args.repetitions,
-        static_cast<long long>(args.warm_up_delay * args.sample_rate),
-        0, 0
-    };
-
-    PaStreamParameters inputParameters{}, outputParameters{};
-    inputParameters.device = args.input_device_idx;
-    inputParameters.channelCount = pa_in_channels;
-    inputParameters.sampleFormat = paFloat32;
-    inputParameters.suggestedLatency = inputDevInfo ? inputDevInfo->defaultHighInputLatency : 0.1;
-
-    outputParameters.device = args.output_device_idx;
-    outputParameters.channelCount = pa_out_channels;
-    outputParameters.sampleFormat = paFloat32;
-    outputParameters.suggestedLatency = outputDevInfo ? outputDevInfo->defaultHighOutputLatency : 0.1;
-
-    #ifdef _WIN32
-    PaAsioStreamInfo asioIn{}, asioOut{};
-    static int inSel[2], outSel[2];
-    if (isAsio) {
-        inSel[0] = args.in_channels[0]; inSel[1] = args.in_channels[1];
-        asioIn.size = sizeof(PaAsioStreamInfo); asioIn.hostApiType = paASIO; asioIn.version = 1;
-        asioIn.flags = paAsioUseChannelSelectors; asioIn.channelSelectors = inSel;
-        inputParameters.hostApiSpecificStreamInfo = &asioIn;
-
-        outSel[0] = args.out_channels[0]; outSel[1] = args.out_channels[1];
-        asioOut.size = sizeof(PaAsioStreamInfo); asioOut.hostApiType = paASIO; asioOut.version = 1;
-        asioOut.flags = paAsioUseChannelSelectors; asioOut.channelSelectors = outSel;
-        outputParameters.hostApiSpecificStreamInfo = &asioOut;
-    }
-    #endif
-
-    std::cout << "\nStarting " << args.repetitions << " sequential measurements using " << args.sample_rate << " Hz sampling rate...\n";
-    std::cout << "Opening hardware stream with " << pa_in_channels << " inputs and " << pa_out_channels << " outputs.\n";
-
-    PaStream* stream = nullptr;
-    PaError err = Pa_OpenStream(&stream, &inputParameters, &outputParameters, args.sample_rate, 
-                                paFramesPerBufferUnspecified, paNoFlag, measurementCallback, &ctx);
-    if (err != paNoError) {
-        std::cerr << "PortAudio Error opening stream: " << Pa_GetErrorText(err) << "\n";
-        return {};
-    }
-
-    err = Pa_StartStream(stream);
-    if (err != paNoError) {
-        std::cerr << "PortAudio Error starting stream: " << Pa_GetErrorText(err) << "\n";
-        Pa_CloseStream(stream);
-        return {};
-    }
-
-    // Warm-up Phase (now fully duplex - reading and writing simultaneously)
-    std::cout << "Warming up the duplex hardware stream for " << args.warm_up_delay << " seconds...\n";
-    while (ctx.warmup_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
-        Pa_Sleep(20);
-    }
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-
-    for (int r = 0; r < args.repetitions; ++r) {
-        std::cout << "Capturing measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
-
-        ctx.current_rep = r;
-        ctx.current_frame = 0;
-        ctx.current_phase = MeasurementContext::MEASURING;
-
-        while (ctx.current_phase == MeasurementContext::MEASURING && Pa_IsStreamActive(stream) == 1) {
-            Pa_Sleep(20);
+    for (int i = 0; i < num_samples; ++i) {
+        float x = static_cast<float>(i - center);
+        float sinc_val = 0.0f;
+        
+        if (std::abs(x) < 1e-5f) {
+            sinc_val = 1.0f;
+        } else {
+            float pi_x = static_cast<float>(M_PI) * cutoff_freq * x;
+            sinc_val = std::sin(pi_x) / pi_x;
         }
 
-        if (r < args.repetitions - 1) {
-            float max_variation = args.mean_wait * 0.10f;
-            std::uniform_real_distribution<float> dis(-max_variation, max_variation);
-            float actual_wait = args.mean_wait + dis(gen);
-            
-            std::cout << "    Entering the inter-measurement pause. Waiting " << actual_wait << " seconds ...\n";
-            
-            long long pause_samples = static_cast<long long>(actual_wait * args.sample_rate);
-            ctx.pause_frames_remaining = pause_samples;
-            ctx.current_phase = MeasurementContext::PAUSING;
+        // Hann window
+        float normalized_n = static_cast<float>(i) / static_cast<float>(num_samples - 1);
+        float hann = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * normalized_n));
 
-            while (ctx.pause_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
-                Pa_Sleep(20);
-            }
+        probe[i] = sinc_val * hann;
+    }
+
+    return probe;
+}
+
+
+
+// Estimates the baseline hardware latency by cross-correlating the recorded probe
+int estimate_baseline_delay(
+    const std::vector<float>& recorded_probe, 
+    const std::vector<float>& pure_probe,
+    int max_expected_latency_samples = 96000) // e.g., max 1 second at 96kHz
+{
+    if (recorded_probe.empty() || pure_probe.empty()) {
+        return 0;
+    }
+
+    size_t rec_size = recorded_probe.size();
+    size_t probe_size = pure_probe.size();
+
+    float max_corr = -1e20f;
+    int best_lag = 0;
+
+    // Search from index 0 up to the maximum expected hardware latency buffer size
+    int search_limit = static_cast<int>(rec_size) - static_cast<int>(probe_size);
+    search_limit = std::min(search_limit, max_expected_latency_samples);
+
+    if (search_limit <= 0) {
+        std::cerr << "Error: Recorded probe buffer is too short for the probe signal size.\n";
+        return 0;
+    }
+
+    for (int lag = 0; lag <= search_limit; ++lag) {
+        float current_dot = 0.0f;
+        float probe_energy = 0.0f;
+        float rec_energy = 0.0f;
+
+        for (size_t n = 0; n < probe_size; ++n) {
+            float val_probe = pure_probe[n];
+            float val_rec = recorded_probe[n + lag];
+
+            current_dot += val_probe * val_rec;
+            probe_energy += val_probe * val_probe;
+            rec_energy += val_rec * val_rec;
+        }
+
+        float denominator = std::sqrt(probe_energy * rec_energy);
+        float ncc = (denominator > 1e-5f) ? (current_dot / denominator) : 0.0f;
+
+        if (ncc > max_corr) {
+            max_corr = ncc;
+            best_lag = lag;
         }
     }
 
-    Pa_StopStream(stream);
-    Pa_CloseStream(stream);
+    std::cout << "Probe cross-correlation peak found at index: " << best_lag 
+              << " (NCC score: " << max_corr << ").\n";
 
-    return align_and_average(ref_history, mic_history, args.sample_rate);
+    return best_lag;
+}
+
+
+
+
+
+std::pair<std::vector<float>, std::vector<float>> align_and_average(
+    const std::vector<std::vector<float>>& ref_history, 
+    const std::vector<std::vector<float>>& mic_history,
+    const std::vector<float>& pure_stimulus,
+    int baseline_delay_samples,
+    float sample_rate
+);
+
+// Placeholder or mock for your audio stream runner / state machine
+// (Assumes your audio engine or callback handles duplex output/input streaming)
+bool play_and_record_audio(
+    const std::vector<float>& output_signal, 
+    std::vector<float>& input_reference, 
+    std::vector<float>& input_microphone
+);
+
+struct MeasurementResult {
+    std::vector<float> averaged_reference;
+    std::vector<float> averaged_microphone;
+    bool success = false;
+};
+
+MeasurementResult perform_acoustic_measurement(
+    const std::vector<float>& pure_stimulus,
+    float sample_rate,
+    int num_repetitions
+) {
+    std::cout << "\n========================================\n";
+    std::cout << " Starting Acoustic Measurement Session  \n";
+    std::cout << "========================================\n";
+
+    // 1. Warmup Phase (Ensures hardware clock and buffers are fully active)
+    std::cout << "[Phase 1] Executing Duplex Warmup...\n";
+    std::vector<float> dummy_warmup(static_cast<size_t>(sample_rate * 0.1f), 0.0f); // 100ms silent warmup
+    std::vector<float> warmup_ref, warmup_mic;
+    if (!play_and_record_audio(dummy_warmup, warmup_ref, warmup_mic)) {
+        std::cerr << "Error: Duplex warmup stream failed.\n";
+        return {};
+    }
+
+    // 2. Probe Phase (Hardware Latency Calibration)
+    std::cout << "[Phase 2] Probing Baseline Hardware Latency...\n";
+    std::vector<float> pure_probe = generate_probe_signal(sample_rate, 5.0f); // 5ms probe pulse
+    std::vector<float> probe_loopback_ref, probe_loopback_mic;
+    
+    // Pad output with trailing zeros so the full response fits in the recording buffer
+    std::vector<float> probe_playback = pure_probe;
+    probe_playback.resize(pure_probe.size() + static_cast<size_t>(sample_rate * 0.05f), 0.0f);
+
+    if (!play_and_record_audio(probe_playback, probe_loopback_ref, probe_loopback_mic)) {
+        std::cerr << "Error: Probe signal playback failed.\n";
+        return {};
+    }
+
+    // Calculate baseline hardware delay using the loopback reference channel
+    int baseline_delay_samples = estimate_baseline_delay(probe_loopback_ref, pure_probe);
+    std::cout << "-> Baseline Latency Established: " << baseline_delay_samples << " samples.\n";
+
+    // 3. Measurement Repetitions Phase
+    std::cout << "[Phase 3] Capturing " << num_repetitions << " Measurement Repetitions...\n";
+    
+    std::vector<std::vector<float>> ref_history;
+    std::vector<std::vector<float>> mic_history;
+    ref_history.reserve(num_repetitions);
+    mic_history.reserve(num_repetitions);
+
+    for (int rep = 0; rep < num_repetitions; ++rep) {
+        std::cout << " Capturing run " << (rep + 1) << " of " << num_repetitions << "...\n";
+        
+        std::vector<float> current_ref, current_mic;
+        if (!play_and_record_audio(pure_stimulus, current_ref, current_mic)) {
+            std::cerr << "Warning: Playback/recording failed for repetition " << (rep + 1) << ". Skipping.\n";
+            continue;
+        }
+
+        ref_history.push_back(current_ref);
+        mic_history.push_back(current_mic);
+    }
+
+    if (ref_history.empty()) {
+        std::cerr << "Error: All measurement repetitions failed.\n";
+        return {};
+    }
+
+    // 4. Alignment & Quality Filtering Phase
+    std::cout << "[Phase 4] Aligning and Averaging Measurements...\n";
+    auto [avg_ref, avg_mic] = align_and_average(
+        ref_history, 
+        mic_history, 
+        pure_stimulus, 
+        baseline_delay_samples, 
+        sample_rate
+    );
+
+    if (avg_ref.empty() || avg_mic.empty()) {
+        std::cerr << "Error: Alignment and averaging failed (all runs rejected).\n";
+        return {};
+    }
+
+    std::cout << "Measurement complete and successfully averaged!\n";
+    return {avg_ref, avg_mic, true};
 }
 
 
