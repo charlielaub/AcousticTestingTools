@@ -209,7 +209,7 @@ void write_float32_wav(const std::string& filename, const std::vector<float>& da
 
 // --- Step 1 & 2: Hardware Device Management ---
 bool check_host_api_and_device(AppArgs& args) {
-    std::cout << "\nInitializing and Validating the Audio Device...\n\n";
+    std::cout << "\nInitializing and Validating the Audio Device...\n";
 
     // 1. Silence terminal output
     #if defined(_WIN32)
@@ -513,51 +513,60 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     if (num_runs == 0) return {};
     size_t signal_size = ref_history[0].size();
     
-    std::vector<std::vector<float>> aligned_ref = {ref_history[0]};
-    std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
+    // 1. Construct the delayed reference template from pure_stimulus
+    std::vector<float> template_ref(signal_size, 0.0f);
+    for (size_t n = 0; n < signal_size; ++n) {
+        long long src_idx = static_cast<long long>(n) - baseline_delay_samples;
+        if (src_idx >= 0 && src_idx < static_cast<long long>(pure_stimulus.size())) {
+            template_ref[n] = pure_stimulus[src_idx];
+        }
+    }
+
+    std::vector<std::vector<float>> aligned_ref;
+    std::vector<std::vector<float>> aligned_mic;
 
     // Convert time window to number of samples based on sample rate
     int max_lag = static_cast<int>(std::round((alignment_window_msec / 1000.0f) * sample_rate));
 
-    if (num_runs > 1) {
-        std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment & Quality Filtering ---\n";
+    if (num_runs > 0) {
+        std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment to Pure Stimulus & Quality Filtering ---\n";
         std::cout << "Max lag window: " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
+        std::cout << "Baseline delay: " << baseline_delay_samples << " samples\n";
     }
 
-    // 3. Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
+    // Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
     static constexpr float min_ncc_threshold = 0.95f;
-    int lag_threshold;
-    lag_threshold = static_cast<int>(0.95f * max_lag);
-    
+    int lag_threshold = static_cast<int>(0.95f * max_lag);
 
     std::vector<float> shifted_ref;
     std::vector<float> shifted_mic;
 
-    for (size_t i = 1; i < num_runs; ++i) {
+    // 2. Loop through ALL runs (from 0 to num_runs - 1) against the pure stimulus template
+    for (size_t i = 0; i < num_runs; ++i) {
         float max_corr = -1e20f;
         int best_lag = 0;
 
         int range_size = 2 * max_lag + 1;
         std::vector<float> corr_scores(range_size, -1e20f);
 
-        // 1. Find best integer lag using normalized cross-correlation
+        // Find best integer lag using normalized cross-correlation
         for (int lag = -max_lag; lag <= max_lag; ++lag) {
             float current_dot = 0.0f;
-            float ref0_energy = 0.0f;
+            float template_energy = 0.0f;
             float ref_i_energy = 0.0f;
 
             for (size_t n = 0; n < signal_size; ++n) {
                 long long ref_idx = static_cast<long long>(n) + lag;
                 if (ref_idx >= 0 && ref_idx < static_cast<long long>(signal_size)) {
-                    float val0 = ref_history[0][n];
+                    float val_tmpl = template_ref[n];
                     float vali = ref_history[i][ref_idx];
-                    current_dot += val0 * vali;
-                    ref0_energy += val0 * val0;
+                    current_dot += val_tmpl * vali;
+                    template_energy += val_tmpl * val_tmpl;
                     ref_i_energy += vali * vali;
                 }
             }
 
-            float denominator = std::sqrt(ref0_energy * ref_i_energy);
+            float denominator = std::sqrt(template_energy * ref_i_energy);
             float ncc = (denominator > 1e-5f) ? (current_dot / denominator) : 0.0f;
 
             corr_scores[lag + max_lag] = ncc;
@@ -568,7 +577,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        // 2. Refine lag to sub-sample precision using Parabolic Interpolation
+        // Refine lag to sub-sample precision using Parabolic Interpolation
         float refined_lag = static_cast<float>(best_lag);
         int best_idx = best_lag + max_lag;
 
@@ -588,12 +597,11 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
                   << " samples (NCC score: " << max_corr << ").\n";
         
         if (std::abs(refined_lag) > lag_threshold) {
-            std::cout << " -> Timing jitter exceeded " << alignment_window_msec << " ms. RUN REJECTED.\n";
+            std::cout << " -> Timing jitter exceeded threshold. RUN REJECTED.\n";
             continue;
         } 
         else if (max_corr < min_ncc_threshold) {
-            std::cout << " -> Shape correlation (" << max_corr << ") below threshold (" 
-                      << min_ncc_threshold << "). RUN REJECTED (likely corrupted).\n";
+            std::cout << " -> Shape correlation (" << max_corr << ") below threshold. RUN REJECTED (likely corrupted).\n";
             continue;
         } 
         else if (std::abs(refined_lag) < 0.2f) {
@@ -610,19 +618,24 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         aligned_mic.push_back(shifted_mic);
     }
 
-    // 4. Compute average across all valid runs
-    num_runs = aligned_ref.size();
-    std::cout << "\nSuccessfully averaged " << num_runs << " out of " << ref_history.size() << " total runs.\n";
+    // 3. Compute average across all valid runs
+    size_t valid_runs = aligned_ref.size();
+    if (valid_runs == 0) {
+        std::cout << "\nWarning: No runs passed quality filtering!\n";
+        return {};
+    }
+
+    std::cout << "\nSuccessfully averaged " << valid_runs << " out of " << num_runs << " total runs.\n";
 
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
-        for (size_t i = 0; i < num_runs; ++i) {
+        for (size_t i = 0; i < valid_runs; ++i) {
             avg_ref[n] += aligned_ref[i][n];
             avg_mic[n] += aligned_mic[i][n];
         }
-        avg_ref[n] /= static_cast<float>(num_runs);
-        avg_mic[n] /= static_cast<float>(num_runs);
+        avg_ref[n] /= static_cast<float>(valid_runs);
+        avg_mic[n] /= static_cast<float>(valid_runs);
     }
 
     return {avg_ref, avg_mic};
@@ -930,7 +943,7 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     }
     #endif
 
-    std::cout << "\nStarting acoustic measurement session at " << args.sample_rate << "Hz...\n";
+    std::cout << "\nStarting acoustic measurement session at " << args.sample_rate << " Hz...\n";
     std::cout << "Opening hardware stream with " << pa_in_channels << " inputs and " << pa_out_channels << " outputs.\n";
 
     PaStream* stream = nullptr;
@@ -969,39 +982,36 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     // Calculate baseline hardware delay using the probe loopback reference
     int baseline_delay_samples = estimate_baseline_delay(probe_ref_record, pure_probe, max_expected_latency);
 
-    std::cout << "-> Baseline Hardware Delay Established: " 
+    std::cout << "    An I/O Delay of " 
         << 1000.0f * baseline_delay_samples / args.sample_rate 
-        << " milliseconds (" << baseline_delay_samples << " samples).\n\n";
+        << " milliseconds (" << baseline_delay_samples << " samples) was found.\n\n";
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    // 3. Repetitions Loop with Duplex Pauses
+    // 3. MEasurement Repetition Loop with Inter-measurement Pauses
     std::cout << "Begin Collecting Data:\n\n";
+    float max_variation = args.mean_wait * 0.10f; //compute variation in wait time
+    float actual_wait;
+
     for (int r = 0; r < args.repetitions; ++r) {
-        std::cout << "Capturing measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
-
-        ctx.current_rep = r;
-        ctx.current_frame = 0;
-        ctx.current_phase = MeasurementContext::MEASURING;
-
-        while (ctx.current_phase == MeasurementContext::MEASURING && Pa_IsStreamActive(stream) == 1) {
+        //Pause
+        std::uniform_real_distribution<float> dis(-max_variation, max_variation);
+        actual_wait = args.mean_wait + dis(gen);
+        std::cout << "    Pausing " << actual_wait << " seconds before collecting next data set.\n";
+        long long pause_samples = static_cast<long long>(actual_wait * args.sample_rate);
+        ctx.pause_frames_remaining = pause_samples;
+        ctx.current_phase = MeasurementContext::PAUSING;
+        while (ctx.pause_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
             Pa_Sleep(20);
         }
 
-        if (r < args.repetitions - 1) {
-            float max_variation = args.mean_wait * 0.10f;
-            std::uniform_real_distribution<float> dis(-max_variation, max_variation);
-            float actual_wait = args.mean_wait + dis(gen);
-            
-            std::cout << "    Entering the duplex inter-measurement pause. Waiting " << actual_wait << " seconds...\n";
-            
-            long long pause_samples = static_cast<long long>(actual_wait * args.sample_rate);
-            ctx.pause_frames_remaining = pause_samples;
-            ctx.current_phase = MeasurementContext::PAUSING;
-
-            while (ctx.pause_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
-                Pa_Sleep(20);
-            }
+        //The pause has completed, so perform measurement
+        std::cout << "Capturing measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
+        ctx.current_rep = r;
+        ctx.current_frame = 0;
+        ctx.current_phase = MeasurementContext::MEASURING;
+        while (ctx.current_phase == MeasurementContext::MEASURING && Pa_IsStreamActive(stream) == 1) {
+            Pa_Sleep(20);
         }
     }
 
@@ -1009,7 +1019,7 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     Pa_CloseStream(stream);
 
     // 4. Pure-Stimulus Alignment, NCC Quality Filtering, and Averaging
-    std::cout << "Aligning repetitions against pure stimulus using baseline latency...\n";
+    std::cout << "Proceeding to align measurements against pure stimulus using I/O latency...\n";
     auto [avg_ref, avg_mic] = align_and_average(
         ref_history, 
         mic_history, 
