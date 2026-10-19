@@ -36,10 +36,20 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
 // Conditionally include Windows ASIO specific headers to query low-level buffer parameters
 #ifdef _WIN32
 #include <windows.h>
 #include "pa_asio.h"
+#endif
+
+// These headers needed to silence unwanted terminal output
+#if defined(_WIN32)
+#include <io.h>
+#include <fcntl.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
 #endif
 
 // Struct to handle parsed arguments
