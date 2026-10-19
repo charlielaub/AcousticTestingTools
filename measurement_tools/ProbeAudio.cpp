@@ -32,6 +32,17 @@ void check_error(PaError err) {
     }
 }
 
+// Helper function to extract a clean base name from Windows device strings
+// e.g., "Out 3-4 (MOTU M Series)" -> "MOTU M Series"
+std::string get_base_device_name(const std::string& raw_name) {
+    size_t open_paren = raw_name.rfind('(');
+    size_t close_paren = raw_name.rfind(')');
+    if (open_paren != std::string::npos && close_paren != std::string::npos && close_paren > open_paren) {
+        return raw_name.substr(open_paren + 1, close_paren - open_paren - 1);
+    }
+    return raw_name; // Fallback if no parentheses found
+}
+
 // Helper function to print detailed diagnostics for a specific device index
 void print_device_details(int i) {
     const PaDeviceInfo* dev_info = Pa_GetDeviceInfo(i);
@@ -150,48 +161,50 @@ int main(int argc, char* argv[]) {
         }
 
         const PaHostApiInfo* chosen_api_info = Pa_GetHostApiInfo(chosen_api);
-        std::cout << "\n[Interactive Mode] Unique Device Names under API: " << chosen_api_info->name << "\n";
+        std::cout << "\n[Interactive Mode] Grouped Hardware Names under API: " << chosen_api_info->name << "\n";
         std::cout << "---------------------------------------------------------\n";
 
         int total_devices = Pa_GetDeviceCount();
-        std::vector<std::string> unique_names;
-        std::map<std::string, std::vector<int>> name_to_indices;
+        std::vector<std::string> unique_base_names;
+        std::map<std::string, std::vector<int>> base_name_to_indices;
 
         for (int i = 0; i < total_devices; ++i) {
             const PaDeviceInfo* dev_info = Pa_GetDeviceInfo(i);
             if (dev_info && dev_info->hostApi == chosen_api) {
-                std::string dev_name = dev_info->name;
-                if (name_to_indices.find(dev_name) == name_to_indices.end()) {
-                    unique_names.push_back(dev_name);
+                std::string base_name = get_base_device_name(dev_info->name);
+                if (base_name_to_indices.find(base_name) == base_name_to_indices.end()) {
+                    unique_base_names.push_back(base_name);
                 }
-                name_to_indices[dev_name].push_back(i);
+                base_name_to_indices[base_name].push_back(i);
             }
         }
 
-        if (unique_names.empty()) {
+        if (unique_base_names.empty()) {
             std::cout << "No devices found for this API.\n";
             Pa_Terminate();
             return 0;
         }
 
-        for (size_t u = 0; u < unique_names.size(); ++u) {
-            std::cout << " [" << u << "] " << unique_names[u] << " (" << name_to_indices[unique_names[u]].size() << " endpoint entries)\n";
+        for (size_t u = 0; u < unique_base_names.size(); ++u) {
+            std::cout << " [" << u << "] " << unique_base_names[u] 
+                      << " (" << base_name_to_indices[unique_base_names[u]].size() << " endpoint entries)\n";
         }
 
         size_t chosen_name_idx = 0;
         std::cout << "\nEnter Device Name Index to inspect: ";
         std::cin >> chosen_name_idx;
 
-        if (std::cin.fail() || chosen_name_idx >= unique_names.size()) {
+        if (std::cin.fail() || chosen_name_idx >= unique_base_names.size()) {
             std::cerr << "Invalid device name selection.\n";
             Pa_Terminate();
             return -1;
         }
 
-        std::string selected_name = unique_names[chosen_name_idx];
-        const std::vector<int>& matching_indices = name_to_indices[selected_name];
+        std::string selected_base_name = unique_base_names[chosen_name_idx];
+        const std::vector<int>& matching_indices = base_name_to_indices[selected_base_name];
 
-        std::cout << "\n[Results] Showing all device entries for name: \"" << selected_name << "\"\n";
+        std::cout << "\n[Results] Showing all " << matching_indices.size() 
+                  << " endpoint entry/entries for: \"" << selected_base_name << "\"\n";
         for (int idx : matching_indices) {
             print_device_details(idx);
         }
