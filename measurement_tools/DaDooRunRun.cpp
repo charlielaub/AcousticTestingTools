@@ -89,7 +89,7 @@ struct AudioContext {
 };
 
 
-// --- Helper: Display Usage / Help Information ---
+// Display Usage / Help Information
 void show_help_info(const char* prog_name) {
     std::cout << "Acoustic Testing Measurement Tool\n\n"
               << "Usage: " << prog_name << " [options]\n\n"
@@ -117,7 +117,7 @@ void show_help_info(const char* prog_name) {
 }
 
 
-// --- Helper: Manual Command Line Parsing ---
+// Command Line Parsing
 AppArgs parse_arguments(int argc, char* argv[]) {
     AppArgs args;
     for (int i = 1; i < argc; ++i) {
@@ -160,7 +160,7 @@ AppArgs parse_arguments(int argc, char* argv[]) {
 }
 
 
-// --- Helper: Write 32-bit Float Mono WAV File ---
+// Write 32-bit Float Mono WAV File
 void write_float32_wav(const std::string& filename, const std::vector<float>& data, int sample_rate) {
     std::string full_name = filename;
     if (full_name.size() < 4 || full_name.substr(full_name.size() - 4) != ".wav") {
@@ -207,11 +207,11 @@ void write_float32_wav(const std::string& filename, const std::vector<float>& da
 }
 
 
-// --- Step 1 & 2: Hardware Device Management ---
+// Hardware Device Management
 bool check_host_api_and_device(AppArgs& args) {
     std::cout << "\nInitializing and Validating the Audio Device...\n";
 
-    // 1. Silence terminal output
+    // Silence terminal output
     #if defined(_WIN32)
     int saved_stderr = _dup(_fileno(stderr));
     int devnull;
@@ -228,11 +228,11 @@ bool check_host_api_and_device(AppArgs& args) {
     }
     #endif
 
-    // 2. Run the PortAudio code
+    // Run the PortAudio code
     Pa_Initialize();
     int num_apis = Pa_GetHostApiCount();
 
-    // 3. Restore terminal output
+    // Restore terminal output
     #if defined(_WIN32)
     _dup2(saved_stderr, _fileno(stderr));
     _close(saved_stderr);
@@ -298,7 +298,7 @@ bool check_host_api_and_device(AppArgs& args) {
 }
 
 
-// --- Step 3: Math and Stimulus Generation (with padding, filtering, gain, and clipping) ---
+// Stimulus Generation (with padding, filtering, gain, and clipping)
 std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float level_dB) {
     // Promote core calculation variables to double precision
     double d_sample_rate = static_cast<double>(sample_rate);
@@ -329,7 +329,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     const double ratio = end_freq / d_start_freq;
     const double two_pi = 2.0 * M_PI;
 
-    // 1. Generate Logarithmic Chirp in Double Precision & Cast to Float
+    // Generate Logarithmic Chirp in Double Precision & Cast to Float
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / d_sample_rate;
         double phase = two_pi * phase_factor * (std::pow(ratio, t / duration) - 1.0);
@@ -338,7 +338,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         stimulus[i] = static_cast<float>(amplitude * std::sin(phase));
     }
  
-    // 2. Apply Tapers (Half-Hann windows)
+    // Apply Tapers (Half-Hann windows)
     int start_length = static_cast<int>(sample_rate * (duration * (0.3f / total_decades)));
     int end_length = static_cast<int>(sample_rate * (duration * (0.15f / total_decades)));
 
@@ -351,16 +351,16 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         stimulus[num_samples - end_length + i] *= (1.0f - hann);
     }
 
-    // 3. Add 0.5sec of zero padding at the end
+    // Add 0.5sec of zero padding at the end
     int end_pad_samples = static_cast<int>(sample_rate * 0.5f);
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
 
-// --- Dynamic Design of a Stable 4th-Order Highpass Bessel Filter ---
+// 4th-Order Highpass Bessel Filter
     // The corner frequency is 4 times the start frequency
     double corner_freq = 4.0 * static_cast<double>(start_freq);
     double fs = static_cast<double>(sample_rate);
 
-    // 1. Correct Pre-warped analog angular frequency for the cutoff
+    // Pre-warp the analog angular frequency for the cutoff
     double absolute_w0 = 2.0 * fs * std::tan(M_PI * corner_freq / fs); 
 
     Eigen::MatrixXd sos(2, 6);
@@ -398,7 +398,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         sos(s, 3) = 1.0;     sos(s, 4) = a1 / a0; sos(s, 5) = a2 / a0;
     }
 
-    // --- Apply the calculated SOS filter using 64-bit State Registers ---
+    // Apply the filter using double precision
     std::vector<double> filtered(stimulus.begin(), stimulus.end());
 
     // Process all SOS stages entirely in double precision
@@ -420,13 +420,13 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         }
     }
 
-    // Convert the final double vector back to float in a separate step
+    // Convert back to float
     std::vector<float> final_output(filtered.size());
     for (size_t i = 0; i < filtered.size(); ++i) {
         final_output[i] = static_cast<float>(filtered[i]);
     }
 
-    // --- Hard clip individual samples that exceed +/- 1.0 (0 dBFS) ---
+    // clip samples that exceed +/- 1.0 (0 dBFS)
     int clipped_count = 0;
     for (float& sample : final_output) {
         if (sample > 1.0f) {
@@ -522,7 +522,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::cout << "Using an alignment window of " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
-    // 3. Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
+    // Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
     static constexpr float min_ncc_threshold = 0.95f;
     int lag_threshold;
     lag_threshold = static_cast<int>(0.95f * max_lag);
@@ -538,7 +538,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         int range_size = 2 * max_lag + 1;
         std::vector<float> corr_scores(range_size, -1e20f);
 
-        // 1. Find best integer lag using normalized cross-correlation
+        // Find best integer lag using normalized cross-correlation
         for (int lag = -max_lag; lag <= max_lag; ++lag) {
             float current_dot = 0.0f;
             float ref0_energy = 0.0f;
@@ -566,7 +566,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        // 2. Refine lag to sub-sample precision using Parabolic Interpolation
+        // Refine lag to sub-sample precision using Parabolic Interpolation
         float refined_lag = static_cast<float>(best_lag);
         int best_idx = best_lag + max_lag;
 
@@ -609,10 +609,8 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         aligned_mic.push_back(shifted_mic);
     }
 
-    // 4. Compute average across all valid runs
+    // Compute average using all valid runs
     num_runs = aligned_ref.size();
-    std::cout << "\nSuccessfully averaged " << num_runs << " out of " << ref_history.size() << " total runs.\n";
-
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
@@ -622,6 +620,9 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         }
         avg_ref[n] /= static_cast<float>(num_runs);
         avg_mic[n] /= static_cast<float>(num_runs);
+    }
+    if ( ref_history.size() > 1 ) {
+        std::cout << "\nAveraged the data using " << num_runs << " out of " << ref_history.size() << " total runs.\n";
     }
 
     return {avg_ref, avg_mic};
@@ -659,14 +660,15 @@ struct MeasurementContext {
 
 
 
-// Generates a short Hann-windowed sinc pulse for latency probing
-std::vector<float> generate_probe_signal(float sample_rate, float duration_ms = 10.0f) {
+// Generate a short Hann-windowed sinc pulse for latency probing
+std::vector<float> generate_probe_signal(float sample_rate, float duration_ms = 1.0f, float dB_level = -6.0 ) {
     int num_samples = static_cast<int>(std::round((duration_ms / 1000.0f) * sample_rate));
     if (num_samples % 2 == 0) num_samples += 1; // Ensure odd length for symmetry
     
     std::vector<float> probe(num_samples, 0.0f);
     int center = num_samples / 2;
     float cutoff_freq = 0.25f; // Fraction of Nyquist
+    const float amplitude = std::pow(10.0f, dB_level / 20.0f ); 
 
     for (int i = 0; i < num_samples; ++i) {
         float x = static_cast<float>(i - center);
@@ -683,7 +685,7 @@ std::vector<float> generate_probe_signal(float sample_rate, float duration_ms = 
         float normalized_n = static_cast<float>(i) / static_cast<float>(num_samples - 1);
         float hann = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * normalized_n));
 
-        probe[i] = sinc_val * hann;
+        probe[i] = amplitude * sinc_val * hann;
     }
 
     return probe;
@@ -883,7 +885,7 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     std::vector<std::vector<float>> mic_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
 
     // Generate probe signal & allocate recording buffers for latency calibration
-    std::vector<float> pure_probe = generate_probe_signal(args.sample_rate, 5.0f);
+    std::vector<float> pure_probe = generate_probe_signal(args.sample_rate, 5.0f, args.level);
     size_t probe_tail_padding = static_cast<size_t>(args.sample_rate * 0.05f); // 50ms tail
     size_t total_probe_record_size = pure_probe.size() + probe_tail_padding;
     
@@ -906,12 +908,12 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     inputParameters.device = args.input_device_idx;
     inputParameters.channelCount = pa_in_channels;
     inputParameters.sampleFormat = paFloat32;
-    inputParameters.suggestedLatency = inputDevInfo ? inputDevInfo->defaultHighInputLatency : 0.1;
+    inputParameters.suggestedLatency = inputDevInfo ? inputDevInfo->defaultLowInputLatency : 0.03;
 
     outputParameters.device = args.output_device_idx;
     outputParameters.channelCount = pa_out_channels;
     outputParameters.sampleFormat = paFloat32;
-    outputParameters.suggestedLatency = outputDevInfo ? outputDevInfo->defaultHighOutputLatency : 0.1;
+    outputParameters.suggestedLatency = outputDevInfo ? outputDevInfo->defaultLowOutputLatency : 0.03;
 
     #ifdef _WIN32
     PaAsioStreamInfo asioIn{}, asioOut{};
@@ -947,13 +949,13 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
         return {};
     }
 
-    // 1. Duplex Warm-up Phase
+    // Duplex I/O Warm-up
     std::cout << "Warming up the duplex hardware stream for " << args.warm_up_delay << " seconds...\n";
     while (ctx.warmup_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
         Pa_Sleep(20);
     }
 
-    // 2. Probe Phase Transition
+    // Get stimulus measurement I/O latency
     std::cout << "\nProbing baseline hardware latency...\n";
     ctx.current_frame = 0;
     ctx.current_phase = MeasurementContext::PROBING;
@@ -962,7 +964,7 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
         Pa_Sleep(20);
     }
 
-    //Use a maximum expected hardware latency of 300msec given in samples
+    //Search within a maximum expected hardware latency of 300msec given in samples
     const int max_expected_latency = static_cast<int>( 0.3f * args.sample_rate );
 
     // Calculate baseline hardware delay using the probe loopback reference
@@ -974,7 +976,7 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    // 3. MEasurement Repetition Loop with Inter-measurement Pauses
+    // Measurement Repetition Loop with Inter-measurement Pauses
     std::cout << "Begin Collecting Data:\n\n";
     float max_variation = args.mean_wait * 0.10f; //compute variation in wait time
     float actual_wait;
@@ -1004,7 +1006,7 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     Pa_StopStream(stream);
     Pa_CloseStream(stream);
 
-    // 4. Pure-Stimulus Alignment, NCC Quality Filtering, and Averaging
+    // Alignment, Quality Filtering, and Averaging of Data
     auto [avg_ref, avg_mic] = align_and_average(
         ref_history, 
         mic_history, 
@@ -1036,7 +1038,7 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // 1. Generate the pure stimulus vector using your existing function
+    // Generate the stimulus
     std::vector<float> stimulus = generate_stimulus(
         args.sample_rate, 
         args.chirp_rate, 
@@ -1044,27 +1046,28 @@ int main(int argc, char* argv[]) {
         args.level
     );
 
-    // 2. Call perform_acoustic_measurement correctly using structured binding for all 3 return fields
+    // perform_acoustic_measurement and return data
     auto [final_avg_ref, final_avg_mic, success] = perform_acoustic_measurement(
         args, 
         stimulus
     );
     
-    // 3. Check for success and proceed
+    // Check in case of failure
     if (! success) {
         std::cerr << "Measurement session failed.\n";
         return 1;
     }
 
+    //Write data as WAV file(s)
     std::cout << "\n--- Saving Data Files ---\n";
+    write_float32_wav(args.mic_output_file, final_avg_mic, args.sample_rate);
     if (!args.stimulus_output_file.empty()) {
         write_float32_wav(args.stimulus_output_file, final_avg_ref, args.sample_rate);
     } else {
         std::cout << " Stimulus output file pathname omitted by user - stimulus data not saved.\n";
     }
 
-    write_float32_wav(args.mic_output_file, final_avg_mic, args.sample_rate);
-    std::cout << " Microphone data file saved.\n\nDone with all measurement tasks.\n";
+    std::cout << "\n------------ All tasks completed ------------ \n\n";
 
     Pa_Terminate();
     return 0;

@@ -2,12 +2,14 @@
 /*                                                                            */
 /*    ProbeAudio.cpp                                                          */
 /*    Copyright (c) 2026 Charlie Laub                                         */
-/*    Licensed under the MIT License. See LICENSE file in the project root      */
+/*    Licensed under the MIT License. See LICENSE file in the project root    */
 /*      for full license information.                                         */
 /*                                                                            */
 /*    Probes the audio cards and devices available to the system. Lists       */
 /*    output and input channels. These values can be use when invoking        */
 /*    other audio processing programs.                                        */
+/*                                                                            */
+/*    Usage: ProbeAudioDevs -c or --choose_from_list, or omit to see all      */
 /*                                                                            */
 /* ========================================================================== */
 
