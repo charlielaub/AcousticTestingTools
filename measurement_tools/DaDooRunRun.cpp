@@ -519,7 +519,9 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
     if (num_runs > 1) {
         std::cout << "\n--- Performing Measurement Alignment & Quality Control ---\n";
-        std::cout << "Using an alignment window of " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
+        std::cout << "Searching within a window of +/- " << alignment_window_msec 
+            << " ms (" << max_lag << " samples at " << sample_rate 
+            << " Hz)\n for best correlation with RUN 1 data.";
     }
 
     // Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
@@ -610,6 +612,11 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     }
 
     // Compute average using all valid runs
+    if ( ref_history.size() > 1 ) {
+        std::cout << "\nPerforming Time-Synchronous Averaging, using " 
+            << num_runs << " out of " << ref_history.size() 
+            << " measurement runs...\n";
+    }
     num_runs = aligned_ref.size();
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
@@ -620,9 +627,6 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         }
         avg_ref[n] /= static_cast<float>(num_runs);
         avg_mic[n] /= static_cast<float>(num_runs);
-    }
-    if ( ref_history.size() > 1 ) {
-        std::cout << "\nAveraged the data using " << num_runs << " out of " << ref_history.size() << " total runs.\n";
     }
 
     return {avg_ref, avg_mic};
@@ -908,12 +912,12 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     inputParameters.device = args.input_device_idx;
     inputParameters.channelCount = pa_in_channels;
     inputParameters.sampleFormat = paFloat32;
-    inputParameters.suggestedLatency = inputDevInfo ? inputDevInfo->defaultLowInputLatency : 0.03;
+    inputParameters.suggestedLatency = inputDevInfo ? inputDevInfo->defaultLowInputLatency : 0.05;
 
     outputParameters.device = args.output_device_idx;
     outputParameters.channelCount = pa_out_channels;
     outputParameters.sampleFormat = paFloat32;
-    outputParameters.suggestedLatency = outputDevInfo ? outputDevInfo->defaultLowOutputLatency : 0.03;
+    outputParameters.suggestedLatency = outputDevInfo ? outputDevInfo->defaultLowOutputLatency : 0.05;
 
     #ifdef _WIN32
     PaAsioStreamInfo asioIn{}, asioOut{};
