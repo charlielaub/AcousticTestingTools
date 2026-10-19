@@ -904,15 +904,29 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    std::vector<float> stimulus = generate_stimulus(args.sample_rate, args.chirp_rate, args.start_freq, args.level);
+    // 1. Generate the pure stimulus vector using your existing function
+    std::vector<float> stimulus = generate_stimulus(
+        args.sample_rate, 
+        args.chirp_rate, 
+        args.start_freq, 
+        args.level
+    );
 
-    auto [final_avg_ref, final_avg_mic] = perform_acoustic_measurement(args, stimulus);
+    // 2. Call perform_acoustic_measurement correctly using structured binding for all 3 return fields
+    auto [final_avg_ref, final_avg_mic, success] = perform_acoustic_measurement(
+        stimulus, 
+        args.sample_rate, 
+        args.num_repetitions
+    );
 
-    // Check if the unpacked vectors are empty (indicating failure)
-    if (final_avg_ref.empty() && final_avg_mic.empty()) {
-        std::cerr << "Error: The measurement aborted due to stream failure.\n";
-        Pa_Terminate(); // Don't forget to clean up PortAudio if initialized here
-        return EXIT_FAILURE; 
+    // 3. Check for success and proceed
+    if (success) {
+        std::cout << "Averaged measurement complete!\n";
+        // Perform your frequency response / impulse response calculations here using:
+        // final_avg_ref and final_avg_mic
+    } else {
+        std::cerr << "Measurement session failed.\n";
+        return 1;
     }
 
     std::cout << "\n--- Saving Data Files ---\n";
