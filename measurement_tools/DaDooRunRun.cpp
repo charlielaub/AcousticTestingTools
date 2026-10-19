@@ -412,12 +412,10 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
         return output;
     }
 
-    // 1. Separate total shift into integer (gross) and fractional (fine) parts.
-    // std::round keeps the fractional part strictly between -0.5 and +0.5.
     int integer_shift = static_cast<int>(std::round(total_shift));
     float fractional_shift = total_shift - static_cast<float>(integer_shift);
 
-    const int num_taps = 31; // Must be odd. Higher = better quality, slightly slower.
+    const int num_taps = 31; // Must be odd
     const int half_taps = num_taps / 2;
 
     for (size_t i = 0; i < size; ++i) {
@@ -425,10 +423,8 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
         float weight_sum = 0.0f;
 
         for (int t = -half_taps; t <= half_taps; ++t) {
-            // 2. Incorporate the integer shift into the sample index lookup
             long long sample_idx = static_cast<long long>(i) - t - integer_shift;
 
-            // Sinc function: sin(pi * x) / (pi * x)
             float x = static_cast<float>(t) - fractional_shift;
             float sinc_val;
             if (std::abs(x) < 1e-5f) {
@@ -438,13 +434,11 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
                 sinc_val = std::sin(pi_x) / pi_x;
             }
 
-            // Hann Window
             float normalized_n = static_cast<float>(t + half_taps) / static_cast<float>(num_taps - 1);
             float hann_window = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * normalized_n));
 
             float coeff = sinc_val * hann_window;
 
-            // 3. Apply zero padding for out-of-bounds indices
             float sample_val = 0.0f;
             if (sample_idx >= 0 && sample_idx < static_cast<long long>(size)) {
                 sample_val = input[sample_idx];
@@ -454,7 +448,6 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
             weight_sum += coeff;
         }
 
-        // Normalize weights, defaulting to zero if completely out of bounds
         if (std::abs(weight_sum) > 1e-5f) {
             output[i] = sum / weight_sum;
         } else {
@@ -467,6 +460,9 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 
 
 // Main alignment and averaging function with sub-sample precision
+// Forward declaration of the filter
+std::vector<float> fractional_delay_filter(const std::vector<float>& input, float total_shift);
+
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
     const std::vector<std::vector<float>>& mic_history,
@@ -546,26 +542,25 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
 
         std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.\n";
         
-        if ( refined_lag > max_lag ) {
-            std::cout << " Timing jitter exceeded " << max_time_ms << " for this run. RUN REJECTED.\n";
+        // FIXED: Check absolute value so both positive and negative outliers are rejected
+        if (std::abs(refined_lag) > static_cast<float>(max_lag)) {
+            std::cout << " Timing jitter exceeded " << max_time_ms << " ms for this run. RUN REJECTED.\n";
             continue;
-        } else if ( std::abs(refined_lag) < 0.2 ) {
+        } else if (std::abs(refined_lag) < 0.2f) {
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } else {
             std::cout << " Correcting timing jitter for this run.\n";
-            // 3. Shift both reference and microphone signals using the fractional delay filter
-            shifted_ref = fractional_delay_filter(ref_history[i], refined_lag);
-            shifted_mic = fractional_delay_filter(mic_history[i], refined_lag);
+            // FIXED: Pass negative refined_lag to match the correct shift direction
+            shifted_ref = fractional_delay_filter(ref_history[i], -refined_lag);
+            shifted_mic = fractional_delay_filter(mic_history[i], -refined_lag);
         }
 
         aligned_ref.push_back(shifted_ref);
         aligned_mic.push_back(shifted_mic);
-
     }
 
-    // 4. Compute average across all runs
-    // Get the number of runs directly from the first dimension of the vector
+    // 3. Compute average across all valid runs
     num_runs = aligned_ref.size();    
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
