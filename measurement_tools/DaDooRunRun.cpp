@@ -501,6 +501,7 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 }
 
 
+
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
     const std::vector<std::vector<float>>& mic_history,
@@ -510,59 +511,52 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     float alignment_window_msec) 
 {
     size_t num_runs = ref_history.size();
-    if (num_runs == 0) return {};
+    if (num_runs == 0 || pure_stimulus.empty()) return {};
     size_t signal_size = ref_history[0].size();
     
-    std::vector<std::vector<float>> aligned_ref = {ref_history[0]};
-    std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
+    std::vector<std::vector<float>> aligned_ref;
+    std::vector<std::vector<float>> aligned_mic;
 
     // Convert time window to number of samples based on sample rate
     int max_lag = static_cast<int>(std::round((alignment_window_msec / 1000.0f) * sample_rate));
 
-    if (num_runs > 1) {
-        std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment & Quality Filtering ---\n";
+    if (num_runs > 0) {
+        std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment against Pure Stimulus ---\n";
         std::cout << "Max lag window: " << alignment_window_msec << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
-    // 3. Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
+    // Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
     static constexpr float min_ncc_threshold = 0.95f;
-    int lag_threshold;
-    lag_threshold = static_cast<int>(0.95f * max_lag);
-    
+    int lag_threshold = static_cast<int>(0.95f * max_lag);
 
-    std::vector<float> shifted_ref;
-    std::vector<float> shifted_mic;
-
-    for (size_t i = 1; i < num_runs; ++i) {
+    // Loop through ALL runs (from 0 to num_runs - 1)
+    for (size_t i = 0; i < num_runs; ++i) {
         float max_corr = -1e20f;
         int best_lag = 0;
 
         int range_size = 2 * max_lag + 1;
         std::vector<float> corr_scores(range_size, -1e20f);
 
-        // 1. Find best integer lag using normalized cross-correlation
+        // 1. Find best integer lag using normalized cross-correlation against pure_stimulus
         for (int lag = -max_lag; lag <= max_lag; ++lag) {
             float current_dot = 0.0f;
-            float ref0_energy = 0.0f;
+            float stim_energy = 0.0f;
             float ref_i_energy = 0.0f;
 
-        for (size_t n = 0; n < signal_size; ++n) {
-            long long ref_idx = static_cast<long long>(n) + lag;
-            long long stim_idx = static_cast<long long>(n) - baseline_delay_samples;
-
-            if (ref_idx >= 0 && ref_idx < static_cast<long long>(signal_size) &&
-                stim_idx >= 0 && stim_idx < static_cast<long long>(pure_stimulus.size())) 
-            {
-                float val0 = pure_stimulus[stim_idx];
-                float vali = ref_history[i][ref_idx];
+            for (size_t n = 0; n < signal_size; ++n) {
+                long long stim_idx = static_cast<long long>(n) + lag - baseline_delay_samples;
                 
-                current_dot += val0 * vali;
-                ref0_energy += val0 * val0;   // Or template_energy
-                ref_i_energy += vali * vali;
+                if (stim_idx >= 0 && stim_idx < static_cast<long long>(pure_stimulus.size())) {
+                    float val_stim = pure_stimulus[stim_idx];
+                    float vali = ref_history[i][n];
+                    
+                    current_dot += val_stim * vali;
+                    stim_energy += val_stim * val_stim;
+                    ref_i_energy += vali * vali;
+                }
             }
-        }
 
-            float denominator = std::sqrt(ref0_energy * ref_i_energy);
+            float denominator = std::sqrt(stim_energy * ref_i_energy);
             float ncc = (denominator > 1e-5f) ? (current_dot / denominator) : 0.0f;
 
             corr_scores[lag + max_lag] = ncc;
@@ -592,16 +586,19 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag 
                   << " samples (NCC score: " << max_corr << ").\n";
         
+        // 3. Quality & Outlier Rejection Checks
         if (std::abs(refined_lag) > lag_threshold) {
-            std::cout << " -> Timing jitter exceeded " << alignment_window_msec << " ms. RUN REJECTED.\n";
+            std::cout << " -> Timing jitter exceeded threshold. RUN REJECTED.\n";
             continue;
         } 
         else if (max_corr < min_ncc_threshold) {
-            std::cout << " -> Shape correlation (" << max_corr << ") below threshold (" 
-                      << min_ncc_threshold << "). RUN REJECTED (likely corrupted).\n";
+            std::cout << " -> Shape correlation (" << max_corr << ") below threshold. RUN REJECTED.\n";
             continue;
         } 
-        else if (std::abs(refined_lag) < 0.2f) {
+        
+        // 4. Fractional Delay Correction
+        std::vector<float> shifted_ref, shifted_mic;
+        if (std::abs(refined_lag) < 0.2f) {
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } 
@@ -615,23 +612,29 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         aligned_mic.push_back(shifted_mic);
     }
 
-    // 4. Compute average across all valid runs
-    num_runs = aligned_ref.size();
-    std::cout << "\nSuccessfully averaged " << num_runs << " out of " << ref_history.size() << " total runs.\n";
+    // 5. Compute average across all valid runs
+    size_t valid_runs = aligned_ref.size();
+    if (valid_runs == 0) {
+        std::cout << "\nError: No runs passed quality filtering!\n";
+        return {};
+    }
+
+    std::cout << "\nSuccessfully averaged " << valid_runs << " out of " << num_runs << " total runs.\n";
 
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
-        for (size_t i = 0; i < num_runs; ++i) {
+        for (size_t i = 0; i < valid_runs; ++i) {
             avg_ref[n] += aligned_ref[i][n];
             avg_mic[n] += aligned_mic[i][n];
         }
-        avg_ref[n] /= static_cast<float>(num_runs);
-        avg_mic[n] /= static_cast<float>(num_runs);
+        avg_ref[n] /= static_cast<float>(valid_runs);
+        avg_mic[n] /= static_cast<float>(valid_runs);
     }
 
     return {avg_ref, avg_mic};
 }
+
 
 
 // Context structure to manage state inside the PortAudio callback
