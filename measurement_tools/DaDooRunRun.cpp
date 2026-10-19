@@ -474,7 +474,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
 
     // Hardcoded local static value for max time lag in milliseconds
-    static constexpr float max_time_ms = 3.0f;
+    static constexpr float max_time_ms = 30.0f;
 
     // Convert time window to number of samples based on sample rate
     int max_lag = static_cast<int>(std::round((max_time_ms / 1000.0f) * sample_rate));
