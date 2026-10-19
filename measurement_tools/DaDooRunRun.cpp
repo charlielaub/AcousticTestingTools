@@ -459,10 +459,6 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 }
 
 
-// Main alignment and averaging function with sub-sample precision
-// Forward declaration of the filter
-std::vector<float> fractional_delay_filter(const std::vector<float>& input, float total_shift);
-
 std::pair<std::vector<float>, std::vector<float>> align_and_average(
     const std::vector<std::vector<float>>& ref_history, 
     const std::vector<std::vector<float>>& mic_history,
@@ -476,13 +472,13 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
     std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
 
     // Hardcoded local static value for max time lag in milliseconds
-    static constexpr float max_time_ms = 20.0f;
+    static constexpr float max_time_ms = 3.0f;
 
     // Convert time window to number of samples based on sample rate
     int max_lag = static_cast<int>(std::round((max_time_ms / 1000.0f) * sample_rate));
 
     if (num_runs > 1) {
-        std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment ---\n";
+        std::cout << "\n--- Performing Sub-Sample Cross-Correlation Alignment & Quality Filtering ---\n";
         std::cout << "Max lag window: " << max_time_ms << " ms (" << max_lag << " samples at " << sample_rate << " Hz)\n";
     }
 
@@ -540,18 +536,27 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             }
         }
 
-        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag << " samples.\n";
+        std::cout << " Run " << i + 1 << " timing jitter: " << refined_lag 
+                  << " samples (NCC score: " << max_corr << ").\n";
         
-        // FIXED: Check absolute value so both positive and negative outliers are rejected
+        // 3. Quality & Outlier Rejection Checks (Threshold set to 0.95)
+        static constexpr float min_ncc_threshold = 0.95f;
+
         if (std::abs(refined_lag) > static_cast<float>(max_lag)) {
-            std::cout << " Timing jitter exceeded " << max_time_ms << " ms for this run. RUN REJECTED.\n";
+            std::cout << " -> Timing jitter exceeded " << max_time_ms << " ms. RUN REJECTED.\n";
             continue;
-        } else if (std::abs(refined_lag) < 0.2f) {
+        } 
+        else if (max_corr < min_ncc_threshold) {
+            std::cout << " -> Shape correlation (" << max_corr << ") below threshold (" 
+                      << min_ncc_threshold << "). RUN REJECTED (likely corrupted).\n";
+            continue;
+        } 
+        else if (std::abs(refined_lag) < 0.2f) {
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
-        } else {
-            std::cout << " Correcting timing jitter for this run.\n";
-            // FIXED: Pass negative refined_lag to match the correct shift direction
+        } 
+        else {
+            std::cout << " -> Correcting timing jitter for this run.\n";
             shifted_ref = fractional_delay_filter(ref_history[i], -refined_lag);
             shifted_mic = fractional_delay_filter(mic_history[i], -refined_lag);
         }
@@ -560,8 +565,10 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         aligned_mic.push_back(shifted_mic);
     }
 
-    // 3. Compute average across all valid runs
-    num_runs = aligned_ref.size();    
+    // 4. Compute average across all valid runs
+    num_runs = aligned_ref.size();
+    std::cout << "\nSuccessfully averaged " << num_runs << " out of " << ref_history.size() << " total runs.\n";
+
     std::vector<float> avg_ref(signal_size, 0.0f);
     std::vector<float> avg_mic(signal_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
