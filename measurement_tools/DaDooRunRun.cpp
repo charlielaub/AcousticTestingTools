@@ -661,7 +661,7 @@ struct MeasurementContext {
 
 
 // Generates a short Hann-windowed sinc pulse for latency probing
-std::vector<float> generate_probe_signal(float sample_rate, float duration_ms = 5.0f) {
+std::vector<float> generate_probe_signal(float sample_rate, float duration_ms = 10.0f) {
     int num_samples = static_cast<int>(std::round((duration_ms / 1000.0f) * sample_rate));
     if (num_samples % 2 == 0) num_samples += 1; // Ensure odd length for symmetry
     
@@ -963,8 +963,12 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
         Pa_Sleep(20);
     }
 
+    //Use a maximum expected hardware latency of 300msec given in samples
+    const int max_expected_latency = static_cast<int>( 0.3f * args.sample_rate );
+
     // Calculate baseline hardware delay using the probe loopback reference
-    int baseline_delay_samples = estimate_baseline_delay(probe_ref_record, pure_probe);
+    int baseline_delay_samples = estimate_baseline_delay(probe_ref_record, pure_probe, max_expected_latency);
+
     std::cout << "-> Baseline Hardware Delay Established: " 
         << 1000.0f * baseline_delay_samples / args.sample_rate 
         << " milliseconds (" << baseline_delay_samples << " samples).\n\n";
