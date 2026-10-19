@@ -916,7 +916,7 @@ int main(int argc, char* argv[]) {
     auto [final_avg_ref, final_avg_mic, success] = perform_acoustic_measurement(
         stimulus, 
         args.sample_rate, 
-        args.num_repetitions
+        args.repetitions
     );
 
     // 3. Check for success and proceed
