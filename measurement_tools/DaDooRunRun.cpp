@@ -200,8 +200,37 @@ void write_float32_wav(const std::string& filename, const std::vector<float>& da
 // --- Step 1 & 2: Hardware Device Management ---
 bool check_host_api_and_device(AppArgs& args) {
     std::cout << "\nInitializing and Validating the Audio Device...\n\n";
+
+    // 1. Silence terminal output
+    #if defined(_WIN32)
+    int saved_stderr = _dup(_fileno(stderr));
+    int devnull;
+    if (_sopen_s(&devnull, "NUL", _O_WRONLY, _SH_DENYNO, 0) == 0) {
+        _dup2(devnull, _fileno(stderr));
+        _close(devnull);
+    }
+    #else
+    int saved_stderr = dup(STDERR_FILENO);
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull != -1) {
+        dup2(devnull, STDERR_FILENO);
+        close(devnull);
+    }
+    #endif
+
+    // 2. Run the PortAudio code
     Pa_Initialize();
     int num_apis = Pa_GetHostApiCount();
+
+    // 3. Restore terminal output
+    #if defined(_WIN32)
+    _dup2(saved_stderr, _fileno(stderr));
+    _close(saved_stderr);
+    #else
+    dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stderr);
+    #endif
+
 
     if (args.api_idx == -1) {
         std::cout << "\nFATAL ERROR: no API index selected via command line parameter --api_idx\n";
