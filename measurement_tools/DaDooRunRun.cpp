@@ -599,9 +599,15 @@ struct MeasurementContext {
     int ch_in0 = 0;
     int ch_in1 = 1;
     
-    enum Phase { WARMUP, MEASURING, PAUSING, COMPLETE };
+    enum Phase { WARMUP, PROBING, MEASURING, PAUSING, COMPLETE };
     Phase current_phase = WARMUP;
     
+    // Probe phase data references
+    const std::vector<float>& probe_stimulus;
+    std::vector<float>& probe_ref_record;
+    std::vector<float>& probe_mic_record;
+    int probe_total_samples = 0;
+
     int current_rep = 0;
     int total_reps = 1;
     long long warmup_frames_remaining = 0;
@@ -609,90 +615,6 @@ struct MeasurementContext {
     int current_frame = 0;
 };
 
-
-// PortAudio Callback Function (Runs in high-priority audio thread)
-static int measurementCallback(const void* inputBuffer, void* outputBuffer,
-                               unsigned long framesPerBuffer,
-                               const PaStreamCallbackTimeInfo* timeInfo,
-                               PaStreamCallbackFlags statusFlags,
-                               void* userData) {
-    auto* ctx = static_cast<MeasurementContext*>(userData);
-    const float* in = static_cast<const float*>(inputBuffer);
-    float* out = static_cast<float*>(outputBuffer);
-
-    for (unsigned long i = 0; i < framesPerBuffer; ++i) {
-        float out_sample = 0.0f;
-
-        // State Machine handling
-        switch (ctx->current_phase) {
-            case MeasurementContext::WARMUP:
-                out_sample = 0.0f;
-                // Duplex Pump: Read and discard input data to keep input buffer active
-                if (in) {
-                    volatile float dummy_ref = in[i * ctx->pa_in_channels + ctx->ch_in0];
-                    volatile float dummy_mic = in[i * ctx->pa_in_channels + ctx->ch_in1];
-                    (void)dummy_ref;
-                    (void)dummy_mic;
-                }
-                if (ctx->warmup_frames_remaining > 0) {
-                    ctx->warmup_frames_remaining--;
-                }
-                break;
-
-            case MeasurementContext::MEASURING:
-                if (ctx->current_frame < ctx->total_samples) {
-                    out_sample = ctx->stimulus[ctx->current_frame];
-                } else {
-                    out_sample = 0.0f;
-                }
-                break;
-
-            case MeasurementContext::PAUSING:
-                out_sample = 0.0f;
-                // Duplex Pump during pause: read and discard input data as well
-                if (in) {
-                    volatile float dummy_ref = in[i * ctx->pa_in_channels + ctx->ch_in0];
-                    volatile float dummy_mic = in[i * ctx->pa_in_channels + ctx->ch_in1];
-                    (void)dummy_ref;
-                    (void)dummy_mic;
-                }
-                if (ctx->pause_frames_remaining > 0) {
-                    ctx->pause_frames_remaining--;
-                }
-                break;
-
-            case MeasurementContext::COMPLETE:
-                out_sample = 0.0f;
-                break;
-        }
-
-        // Write output channels
-        out[i * ctx->pa_out_channels + 0] = out_sample;
-        out[i * ctx->pa_out_channels + 1] = out_sample;
-
-        // Read input channels (only during active measurement phase)
-        if (ctx->current_phase == MeasurementContext::MEASURING) {
-            if (ctx->current_frame < ctx->total_samples && in) {
-                ctx->ref_history[ctx->current_rep][ctx->current_frame] = in[i * ctx->pa_in_channels + ctx->ch_in0];
-                ctx->mic_history[ctx->current_rep][ctx->current_frame] = in[i * ctx->pa_in_channels + ctx->ch_in1];
-            }
-            ctx->current_frame++;
-
-            if (ctx->current_frame >= ctx->total_samples) {
-                ctx->current_rep++;
-                ctx->current_frame = 0;
-                
-                if (ctx->current_rep >= ctx->total_reps) {
-                    ctx->current_phase = MeasurementContext::COMPLETE;
-                } else {
-                    ctx->current_phase = MeasurementContext::PAUSING;
-                }
-            }
-        }
-    }
-
-    return (ctx->current_phase == MeasurementContext::COMPLETE) ? paComplete : paContinue;
-}
 
 
 
@@ -786,21 +708,112 @@ int estimate_baseline_delay(
 
 
 
-std::pair<std::vector<float>, std::vector<float>> align_and_average(
-    const std::vector<std::vector<float>>& ref_history, 
-    const std::vector<std::vector<float>>& mic_history,
-    const std::vector<float>& pure_stimulus,
-    int baseline_delay_samples,
-    float sample_rate
-);
+// PortAudio Callback Function (Runs in high-priority audio thread)
+static int measurementCallback(const void* inputBuffer, void* outputBuffer,
+                               unsigned long framesPerBuffer,
+                               const PaStreamCallbackTimeInfo* timeInfo,
+                               PaStreamCallbackFlags statusFlags,
+                               void* userData) {
+    auto* ctx = static_cast<MeasurementContext*>(userData);
+    const float* in = static_cast<const float*>(inputBuffer);
+    float* out = static_cast<float*>(outputBuffer);
 
-// Placeholder or mock for your audio stream runner / state machine
-// (Assumes your audio engine or callback handles duplex output/input streaming)
-bool play_and_record_audio(
-    const std::vector<float>& output_signal, 
-    std::vector<float>& input_reference, 
-    std::vector<float>& input_microphone
-);
+    for (unsigned long i = 0; i < framesPerBuffer; ++i) {
+        float out_sample = 0.0f;
+
+        // State Machine handling
+        switch (ctx->current_phase) {
+            case MeasurementContext::WARMUP:
+                out_sample = 0.0f;
+                if (in) {
+                    volatile float dummy_ref = in[i * ctx->pa_in_channels + ctx->ch_in0];
+                    volatile float dummy_mic = in[i * ctx->pa_in_channels + ctx->ch_in1];
+                    (void)dummy_ref;
+                    (void)dummy_mic;
+                }
+                if (ctx->warmup_frames_remaining > 0) {
+                    ctx->warmup_frames_remaining--;
+                }
+                break;
+
+            case MeasurementContext::PROBING:
+                if (ctx->current_frame < ctx->probe_total_samples) {
+                    out_sample = ctx->probe_stimulus[ctx->current_frame];
+                } else {
+                    out_sample = 0.0f; // Padding for tail recording
+                }
+                break;
+
+            case MeasurementContext::MEASURING:
+                if (ctx->current_frame < ctx->total_samples) {
+                    out_sample = ctx->stimulus[ctx->current_frame];
+                } else {
+                    out_sample = 0.0f;
+                }
+                break;
+
+            case MeasurementContext::PAUSING:
+                out_sample = 0.0f;
+                if (in) {
+                    volatile float dummy_ref = in[i * ctx->pa_in_channels + ctx->ch_in0];
+                    volatile float dummy_mic = in[i * ctx->pa_in_channels + ctx->ch_in1];
+                    (void)dummy_ref;
+                    (void)dummy_mic;
+                }
+                if (ctx->pause_frames_remaining > 0) {
+                    ctx->pause_frames_remaining--;
+                }
+                break;
+
+            case MeasurementContext::COMPLETE:
+                out_sample = 0.0f;
+                break;
+        }
+
+        // Write output channels
+        out[i * ctx->pa_out_channels + 0] = out_sample;
+        out[i * ctx->pa_out_channels + 1] = out_sample;
+
+        // Read input channels during Probing phase
+        if (ctx->current_phase == MeasurementContext::PROBING) {
+            size_t record_idx = static_cast<size_t>(ctx->current_frame);
+            if (record_idx < ctx->probe_ref_record.size() && in) {
+                ctx->probe_ref_record[record_idx] = in[i * ctx->pa_in_channels + ctx->ch_in0];
+                ctx->probe_mic_record[record_idx] = in[i * ctx->pa_in_channels + ctx->ch_in1];
+            }
+            ctx->current_frame++;
+
+            // Total probe recording length = probe stimulus + 50ms tail padding for latency
+            if (ctx->current_frame >= static_cast<int>(ctx->probe_ref_record.size())) {
+                ctx->current_phase = MeasurementContext::MEASURING;
+                ctx->current_frame = 0;
+                ctx->current_rep = 0;
+            }
+        }
+        // Read input channels during Active Measurement phase
+        else if (ctx->current_phase == MeasurementContext::MEASURING) {
+            if (ctx->current_frame < ctx->total_samples && in) {
+                ctx->ref_history[ctx->current_rep][ctx->current_frame] = in[i * ctx->pa_in_channels + ctx->ch_in0];
+                ctx->mic_history[ctx->current_rep][ctx->current_frame] = in[i * ctx->pa_in_channels + ctx->ch_in1];
+            }
+            ctx->current_frame++;
+
+            if (ctx->current_frame >= ctx->total_samples) {
+                ctx->current_rep++;
+                ctx->current_frame = 0;
+                
+                if (ctx->current_rep >= ctx->total_reps) {
+                    ctx->current_phase = MeasurementContext::COMPLETE;
+                } else {
+                    ctx->current_phase = MeasurementContext::PAUSING;
+                }
+            }
+        }
+    }
+
+    return (ctx->current_phase == MeasurementContext::COMPLETE) ? paComplete : paContinue;
+}
+
 
 struct MeasurementResult {
     std::vector<float> averaged_reference;
@@ -808,76 +821,152 @@ struct MeasurementResult {
     bool success = false;
 };
 
-MeasurementResult perform_acoustic_measurement(
-    const std::vector<float>& pure_stimulus,
-    float sample_rate,
-    int num_repetitions
-) {
-    std::cout << "\n========================================\n";
-    std::cout << " Starting Acoustic Measurement Session  \n";
-    std::cout << "========================================\n";
 
-    // 1. Warmup Phase (Ensures hardware clock and buffers are fully active)
-    std::cout << "[Phase 1] Executing Duplex Warmup...\n";
-    std::vector<float> dummy_warmup(static_cast<size_t>(sample_rate * 0.1f), 0.0f); // 100ms silent warmup
-    std::vector<float> warmup_ref, warmup_mic;
-    if (!play_and_record_audio(dummy_warmup, warmup_ref, warmup_mic)) {
-        std::cerr << "Error: Duplex warmup stream failed.\n";
+MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<float>& stimulus) {
+    int total_samples = stimulus.size();
+    
+    const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
+    const PaDeviceInfo* outputDevInfo = Pa_GetDeviceInfo(args.output_device_idx);
+    bool isAsio = false;
+    #ifdef _WIN32
+    if (inputDevInfo && Pa_GetHostApiInfo(inputDevInfo->hostApi)->type == paASIO) isAsio = true;
+    #endif
+
+    int pa_out_channels = isAsio ? 2 : std::max(args.out_channels[0], args.out_channels[1]) + 1;
+    int pa_in_channels  = isAsio ? 2 : std::max(args.in_channels[0],  args.in_channels[1])  + 1;
+    if (pa_out_channels < 2) pa_out_channels = 2;
+    if (pa_in_channels < 2)  pa_in_channels  = 2;
+
+    std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
+    std::vector<std::vector<float>> mic_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
+
+    // Generate probe signal & allocate recording buffers for latency calibration
+    std::vector<float> pure_probe = generate_probe_signal(args.sample_rate, 5.0f);
+    size_t probe_tail_padding = static_cast<size_t>(args.sample_rate * 0.05f); // 50ms tail
+    size_t total_probe_record_size = pure_probe.size() + probe_tail_padding;
+    
+    std::vector<float> probe_ref_record(total_probe_record_size, 0.0f);
+    std::vector<float> probe_mic_record(total_probe_record_size, 0.0f);
+
+    MeasurementContext ctx{
+        stimulus, ref_history, mic_history,
+        total_samples, pa_in_channels, pa_out_channels,
+        isAsio ? 0 : args.in_channels[0],
+        isAsio ? 1 : args.in_channels[1],
+        MeasurementContext::WARMUP,
+        pure_probe, probe_ref_record, probe_mic_record, static_cast<int>(pure_probe.size()),
+        0, args.repetitions,
+        static_cast<long long>(args.warm_up_delay * args.sample_rate),
+        0, 0
+    };
+
+    PaStreamParameters inputParameters{}, outputParameters{};
+    inputParameters.device = args.input_device_idx;
+    inputParameters.channelCount = pa_in_channels;
+    inputParameters.sampleFormat = paFloat32;
+    inputParameters.suggestedLatency = inputDevInfo ? inputDevInfo->defaultHighInputLatency : 0.1;
+
+    outputParameters.device = args.output_device_idx;
+    outputParameters.channelCount = pa_out_channels;
+    outputParameters.sampleFormat = paFloat32;
+    outputParameters.suggestedLatency = outputDevInfo ? outputDevInfo->defaultHighOutputLatency : 0.1;
+
+    #ifdef _WIN32
+    PaAsioStreamInfo asioIn{}, asioOut{};
+    static int inSel[2], outSel[2];
+    if (isAsio) {
+        inSel[0] = args.in_channels[0]; inSel[1] = args.in_channels[1];
+        asioIn.size = sizeof(PaAsioStreamInfo); asioIn.hostApiType = paASIO; asioIn.version = 1;
+        asioIn.flags = paAsioUseChannelSelectors; asioIn.channelSelectors = inSel;
+        inputParameters.hostApiSpecificStreamInfo = &asioIn;
+
+        outSel[0] = args.out_channels[0]; outSel[1] = args.out_channels[1];
+        asioOut.size = sizeof(PaAsioStreamInfo); asioOut.hostApiType = paASIO; asioOut.version = 1;
+        asioOut.flags = paAsioUseChannelSelectors; asioOut.channelSelectors = outSel;
+        outputParameters.hostApiSpecificStreamInfo = &asioOut;
+    }
+    #endif
+
+    std::cout << "\nStarting acoustic measurement session at " << args.sample_rate << "Hz...\n";
+    std::cout << "Opening hardware stream with " << pa_in_channels << " inputs and " << pa_out_channels << " outputs.\n";
+
+    PaStream* stream = nullptr;
+    PaError err = Pa_OpenStream(&stream, &inputParameters, &outputParameters, args.sample_rate, 
+                                paFramesPerBufferUnspecified, paNoFlag, measurementCallback, &ctx);
+    if (err != paNoError) {
+        std::cerr << "PortAudio Error opening stream: " << Pa_GetErrorText(err) << "\n";
         return {};
     }
 
-    // 2. Probe Phase (Hardware Latency Calibration)
-    std::cout << "[Phase 2] Probing Baseline Hardware Latency...\n";
-    std::vector<float> pure_probe = generate_probe_signal(sample_rate, 5.0f); // 5ms probe pulse
-    std::vector<float> probe_loopback_ref, probe_loopback_mic;
-    
-    // Pad output with trailing zeros so the full response fits in the recording buffer
-    std::vector<float> probe_playback = pure_probe;
-    probe_playback.resize(pure_probe.size() + static_cast<size_t>(sample_rate * 0.05f), 0.0f);
-
-    if (!play_and_record_audio(probe_playback, probe_loopback_ref, probe_loopback_mic)) {
-        std::cerr << "Error: Probe signal playback failed.\n";
+    err = Pa_StartStream(stream);
+    if (err != paNoError) {
+        std::cerr << "PortAudio Error starting stream: " << Pa_GetErrorText(err) << "\n";
+        Pa_CloseStream(stream);
         return {};
     }
 
-    // Calculate baseline hardware delay using the loopback reference channel
-    int baseline_delay_samples = estimate_baseline_delay(probe_loopback_ref, pure_probe);
-    std::cout << "-> Baseline Latency Established: " << baseline_delay_samples << " samples.\n";
+    // 1. Duplex Warm-up Phase
+    std::cout << "Warming up the duplex hardware stream for " << args.warm_up_delay << " seconds...\n";
+    while (ctx.warmup_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
+        Pa_Sleep(20);
+    }
 
-    // 3. Measurement Repetitions Phase
-    std::cout << "[Phase 3] Capturing " << num_repetitions << " Measurement Repetitions...\n";
-    
-    std::vector<std::vector<float>> ref_history;
-    std::vector<std::vector<float>> mic_history;
-    ref_history.reserve(num_repetitions);
-    mic_history.reserve(num_repetitions);
+    // 2. Probe Phase Transition
+    std::cout << "Probing baseline hardware latency...\n";
+    ctx.current_frame = 0;
+    ctx.current_phase = MeasurementContext::PROBING;
 
-    for (int rep = 0; rep < num_repetitions; ++rep) {
-        std::cout << " Capturing run " << (rep + 1) << " of " << num_repetitions << "...\n";
-        
-        std::vector<float> current_ref, current_mic;
-        if (!play_and_record_audio(pure_stimulus, current_ref, current_mic)) {
-            std::cerr << "Warning: Playback/recording failed for repetition " << (rep + 1) << ". Skipping.\n";
-            continue;
+    while (ctx.current_phase == MeasurementContext::PROBING && Pa_IsStreamActive(stream) == 1) {
+        Pa_Sleep(20);
+    }
+
+    // Calculate baseline hardware delay using the probe loopback reference
+    int baseline_delay_samples = estimate_baseline_delay(probe_ref_record, pure_probe);
+    std::cout << "-> Baseline Hardware Delay Established: " << baseline_delay_samples << " samples.\n";
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    // 3. Repetitions Loop with Duplex Pauses
+    for (int r = 0; r < args.repetitions; ++r) {
+        std::cout << "Capturing measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
+
+        ctx.current_rep = r;
+        ctx.current_frame = 0;
+        ctx.current_phase = MeasurementContext::MEASURING;
+
+        while (ctx.current_phase == MeasurementContext::MEASURING && Pa_IsStreamActive(stream) == 1) {
+            Pa_Sleep(20);
         }
 
-        ref_history.push_back(current_ref);
-        mic_history.push_back(current_mic);
+        if (r < args.repetitions - 1) {
+            float max_variation = args.mean_wait * 0.10f;
+            std::uniform_real_distribution<float> dis(-max_variation, max_variation);
+            float actual_wait = args.mean_wait + dis(gen);
+            
+            std::cout << "    Entering the duplex inter-measurement pause. Waiting " << actual_wait << " seconds...\n";
+            
+            long long pause_samples = static_cast<long long>(actual_wait * args.sample_rate);
+            ctx.pause_frames_remaining = pause_samples;
+            ctx.current_phase = MeasurementContext::PAUSING;
+
+            while (ctx.pause_frames_remaining > 0 && Pa_IsStreamActive(stream) == 1) {
+                Pa_Sleep(20);
+            }
+        }
     }
 
-    if (ref_history.empty()) {
-        std::cerr << "Error: All measurement repetitions failed.\n";
-        return {};
-    }
+    Pa_StopStream(stream);
+    Pa_CloseStream(stream);
 
-    // 4. Alignment & Quality Filtering Phase
-    std::cout << "[Phase 4] Aligning and Averaging Measurements...\n";
+    // 4. Pure-Stimulus Alignment, NCC Quality Filtering, and Averaging
+    std::cout << "Aligning repetitions against pure stimulus using baseline latency...\n";
     auto [avg_ref, avg_mic] = align_and_average(
         ref_history, 
         mic_history, 
-        pure_stimulus, 
+        stimulus, 
         baseline_delay_samples, 
-        sample_rate
+        args.sample_rate
     );
 
     if (avg_ref.empty() || avg_mic.empty()) {
@@ -888,6 +977,7 @@ MeasurementResult perform_acoustic_measurement(
     std::cout << "Measurement complete and successfully averaged!\n";
     return {avg_ref, avg_mic, true};
 }
+
 
 
 
