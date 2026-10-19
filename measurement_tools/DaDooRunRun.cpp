@@ -544,7 +544,7 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
             float ref_i_energy = 0.0f;
 
             for (size_t n = 0; n < signal_size; ++n) {
-                long long stim_idx = static_cast<long long>(n) + lag - baseline_delay_samples;
+                long long stim_idx = static_cast<long long>(n) + lag + baseline_delay_samples;
                 
                 if (stim_idx >= 0 && stim_idx < static_cast<long long>(pure_stimulus.size())) {
                     float val_stim = pure_stimulus[stim_idx];
