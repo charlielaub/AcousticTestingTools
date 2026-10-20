@@ -24,7 +24,7 @@ def read_wav_file(file_path):
 def write_wav_file(file_path, sample_rate, data_float32):
     """Writes time-domain data as FLOAT32 WAV file without normalization."""
     wavfile.write(file_path, sample_rate, data_float32)
-    print(f"H1 time-domain data saved to '{file_path}' (FLOAT32, {sample_rate} Hz).")
+    print(f"The calculated impulse response was saved to '{file_path}' at {sample_rate} Hz in FLOAT32 format.\n")
 
 
 def calculate_stimulus_Vrms(x, v_max, stimulus_gain):
@@ -45,16 +45,16 @@ def calculate_stimulus_Vrms(x, v_max, stimulus_gain):
     rms_voltage = v_max * np.sqrt(np.mean(x_core**2))
     
     # Scale by stimulus gain to get voltage at loudspeaker terminals
-    if v_stimulus is not None:
+    if stimulus_gain is not None:
         rms_voltage *= stimulus_gain
 
     # Print the result
-    print(f"RMS Voltage of the stimulus signal at amplifier or loudspeaker terminals = {rms_voltage:.4f} V")
+    print(f"The stimulus voltage applied to the loudspeaker was {rms_voltage:.4f} Vrms.\n")
     
     #return rms_voltage
 
 
-def compute_h1_time_domain(measurement, stimulus, level_scaling):
+def compute_h1_time_domain(measurement, stimulus):
     """
     Computes the time-domain H1 impulse response.
     All frequency-domain operations and spectral variables are kept internal.
@@ -144,8 +144,10 @@ def main():
     if fs_measurement != fs_stimulus:
         raise ValueError(f"Sampling rates do not match: {fs_measurement} Hz vs {fs_stimulus} Hz")
 
+    print(f"\n\nNow processing measurement data to produce the impulse response...\n\n")
+
     # Calculate and report the RMS Voltage of the stimulus signal
-    calculate_stimulus_Vrms( x, args.vmax_stimulus_input. args.stimulus_gain] )
+    calculate_stimulus_Vrms( x, args.vmax_stimulus_input, args.stimulus_gain )
 
     # Compute H1 purely in the time domain (inputs/outputs are time-domain)
     h1_time = compute_h1_time_domain(measurement=y, stimulus=x)
@@ -153,10 +155,10 @@ def main():
     # correct H1 by the ratio of the mic channel and reference channel voltage maximxums
     # this converts the units into Volts measured by the Mic per Volt of stimulus
     h1_time *= args.vmax_mic_input / args.vmax_stimulus_input
+    print(f"The H1 estimator produces data with the following units:\n   Volts produced by the microphone per Volt stimulus at the loudspeaker.\n")
 
     # Write output file in main
     write_wav_file(args.output, fs_measurement, h1_time)
-    print(f"The H1 estimator data was written to file in units of Volts produced by the microphone per Volt stimulus at the loudspeaker")
 
     # Plot time-domain result
     plot_h1_response(h1_time, fs_measurement)

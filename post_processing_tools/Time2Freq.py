@@ -116,64 +116,118 @@ def write_frd_file(filename, freqs, mag_db, phase_deg):
     except Exception as e:
         print(f"Error saving FRD file: {e}")
 
-def compute_frequency_response(audio_data, sample_rate, gate_end_idx, 
-            tukey_alpha, mic_cal_file, mic_sensitivity, v_stimulus, 
-            distance
-            ):
-    """
-    Applies a Tukey window, computes standard FFT and minimum phase FFT, 
-    applies correction factors and returns frequencies, magnitude (dB), 
-    standard phase (deg), and minimum phase (deg).
+
+
+import numpy as np
+import scipy.signal
+
+
+def compute_frequency_response(
+    audio_data,
+    sample_rate,
+    gate_end_idx,
+    tukey_alpha,
+    mic_cal_file,
+    mic_sensitivity,
+    v_stimulus,
+    distance,
+):
+    """Applies a Tukey window, computes standard FFT and minimum phase FFT,
+
+    applies correction factors and returns frequencies, magnitude (dB),
+    standard phase (deg), minimum phase (deg), and delta_frequency (Hz).
     """
     gate_end_idx = max(10, min(gate_end_idx, len(audio_data)))
-    
+
     # Get Tukey window using scipy.signal.get_window
     win = scipy.signal.get_window(('tukey', tukey_alpha), gate_end_idx)
-    
-    windowed_data = np.zeros_like(audio_data, dtype=np.float32)
-    segment = audio_data[:gate_end_idx].astype(np.float32)
-    windowed_data[:gate_end_idx] = segment * win
-    
-    # Zero-pad for smoother frequency resolution
+
+    # Restrict windowed_data strictly to the gated segment length
+    windowed_data = audio_data[:gate_end_idx].astype(np.float32) * win
+
+    # Zero-pad for smoother frequency resolution in the FFT
     n_fft = max(2048, 2 * len(windowed_data))
-    
+
     # Standard FFT response
     fft_result = np.fft.rfft(windowed_data, n=n_fft)
-    freqs = np.fft.rfftfreq(n_fft, d=1.0/sample_rate)
-    
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
+
     mag = np.abs(fft_result)
-    mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12)) # Prevent log(0)
+    mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))  # Prevent log(0)
     phase_deg = np.angle(fft_result, deg=True)
-    
+
     # Apply Microphone Sensitivity Scaling
     if mic_sensitivity is not None and mic_sensitivity > 0:
         sensitivity_v_pa = mic_sensitivity / 1000.0  # mV/Pa to V/Pa
         p_ref = 20e-6  # 20 uPa reference pressure
         spl_offset = -20.0 * np.log10(sensitivity_v_pa * p_ref)
         mag_db += spl_offset
-        
+
     # Apply Microphone Calibration File Compensation
     if mic_cal_file is not None:
         cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
         mag_db -= cal_corrections
-        
+
     # Scale for stimulus RMS voltage
-    mag_db -= 20.0 * np.log10( v_stimulus )
+    mag_db -= 20.0 * np.log10(v_stimulus)
 
     # Scale for measurement distance
     if distance is not None:
-        mag_db += 20.0 * np.log10( distance )
+        mag_db += 20.0 * np.log10(distance)
 
-    # Compute Minimum Phase response
+    # Compute Minimum Phase response on the active windowed data
     try:
-        min_phase_signal = scipy.signal.minimum_phase(windowed_data, method='homomorphic', half=False)
+        min_phase_signal = scipy.signal.minimum_phase(
+            windowed_data, method='homomorphic', half=False
+        )
         min_fft_result = np.fft.rfft(min_phase_signal, n=n_fft)
         min_phase_deg = np.angle(min_fft_result, deg=True)
     except Exception:
         min_phase_deg = phase_deg.copy()
-    
+
+    # --- Frequency Resolution Calculation via NCC & IFFT ---
+    try:
+        # 1. Generate minimum phase time response using amplitude and minimum phase
+        min_phase_rad = np.deg2rad(min_phase_deg)
+        min_complex_spectrum = mag * np.exp(1j * min_phase_rad)
+        impulse_minphase = np.fft.irfft(min_complex_spectrum, n=n_fft)
+
+        # Truncate impulse_minphase back to the window length for accurate cross-correlation
+        impulse_minphase_trimmed = impulse_minphase[: len(windowed_data)]
+
+        # 2. Compute Normalized Cross-Correlation (NCC) between the gated data and min-phase impulse
+        f = windowed_data - np.mean(windowed_data)
+        g = impulse_minphase_trimmed - np.mean(impulse_minphase_trimmed)
+        xcorr = scipy.signal.correlate(f, g, mode='full')
+        norm = np.sqrt(np.sum(f**2) * np.sum(g**2))
+        if norm > 0:
+            xcorr /= norm
+
+        # 3. Find peak position, convert to time, and calculate delta frequency
+        ncc_max_pos = np.argmax(xcorr)
+        # In 'full' mode, the zero-lag/start alignment offset is len(g) - 1
+        peak_index_offset = abs(ncc_max_pos - (len(g) - 1))
+        
+        ncc_max_time = float(peak_index_offset) / sample_rate
+        gate_end_time = float(gate_end_idx) / sample_rate
+
+        time_diff = gate_end_time - ncc_max_time
+        delta_frequency = (
+            float(1.0 / time_diff) if time_diff > 0 else float(sample_rate / n_fft)
+        )
+    except Exception:
+        delta_frequency = float(sample_rate / n_fft)
+
     valid_idx = freqs <= (sample_rate / 2.0)
-    return freqs[valid_idx], mag_db[valid_idx], phase_deg[valid_idx], min_phase_deg[valid_idx]
+    return (
+        freqs[valid_idx],
+        mag_db[valid_idx],
+        phase_deg[valid_idx],
+        min_phase_deg[valid_idx],
+        delta_frequency,
+    )
+
+
 
 def main():
     # Parse command-line arguments
@@ -234,7 +288,8 @@ def main():
         'freq_line_plot': None,
         'showing_phase': False,
         'using_min_phase': False,
-        'tukey_alpha': 0.05
+        'tukey_alpha': 0.25,
+        'resolution': None
     }
     
     # Plot Tukey window function as a red line initially scaled to 95% of current y max
@@ -243,7 +298,11 @@ def main():
     initial_y_top = ylim_initial[1] if ylim_initial[1] != 0 else 1.0
     window_line, = ax_time.plot(time_axis[:initial_gate_idx] * 1000, initial_win * (0.95 * initial_y_top), color='r', lw=1.5, label='Tukey Window')
     
-    ax_time.legend(loc='lower right')
+    ax_time.legend(loc='lower right',
+        framealpha=1.0,  # Makes the background fully opaque (1.0) instead of semi-transparent
+        facecolor='white',  # Sets the background color of the legend box explicitly
+        edgecolor='black',  # Sets the border color of the legend box
+    )
     
     # 2. Configure Frequency Domain Plot with automatic scaling and gridlines
     ax_freq.set_title("Frequency Domain Data")
@@ -257,8 +316,8 @@ def main():
     ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
     
     # Define Button Axes [left, bottom, width, height] - Evenly distributed, height set to 0.05
-    btn_y = 0.04
-    btn_h = 0.05
+    btn_y = 0.03
+    btn_h = 0.04
     
     ax_btn_gate       = plt.axes([0.03,  btn_y, 0.14, btn_h])
     ax_btn_calc       = plt.axes([0.19,  btn_y, 0.16, btn_h])
@@ -273,11 +332,20 @@ def main():
     btn_save_exit = Button(ax_btn_save_exit, 'Save & Exit', color='aliceblue', hovercolor='palegreen')
     
     # Define Tukey Alpha Text Box Axes above Place Gate & Compute buttons
-    ax_box_tukey = plt.axes([0.19, 0.125, 0.12, 0.035])
-    textbox_tukey = TextBox(ax_box_tukey, '', initial=str(state['tukey_alpha']))
-    
-    # Larger font label with colon
-    fig.text(0.03, 0.13, "Tukey window taper:", fontsize=11, fontweight='medium')
+    ax_box_tukey = plt.axes([0.21, 0.10, 0.06, 0.03])
+    textbox_tukey = TextBox(ax_box_tukey, 'TUKEY WINDOW WIDTH:  ', initial=str(state['tukey_alpha']),textalignment='center')
+
+    #Create text box to display the current phase type
+    # Adjust coordinates [left, bottom, width, height] to place it just above toggle Phase-Minphase button
+    ax_box_phase_type = plt.axes([0.66, 0.10, 0.13, 0.03])
+    # The label argument automatically places "PHASE TYPE:" to the left of the box
+    initial_text = 'minimum phase' if state['using_min_phase'] else 'regular phase'
+    phase_textbox = TextBox(
+        ax_box_phase_type, 'PHASE TYPE:  ', initial=initial_text, textalignment='center'
+    )
+    # Disable user editing since this is purely a status indicator
+    phase_textbox.set_active(False)
+
 
     def update_tukey_visual(event=None):
         """Redraws the Tukey window line to stay within view and reach 95% of y-axis max."""
@@ -349,11 +417,18 @@ def main():
             ax_freq.autoscale_view()
             ax_freq.set_ylabel(mag_ylabel)
             ax_freq.set_title("Frequency Domain Data (Cleared)")
+            ax_freq.set_xlabel(f'Frequency (Hz)')
             fig.canvas.draw_idle()
-            print("Lower plot cleared.")
+            # Clear calculated data
+            state['freqs'] = None
+            state['mag_db'] = None
+            state['phase_deg'] = None
+            state['min_phase_deg'] = None
+            state['resolution'] = None
+            print("Lower plot cleared. All calculated data cleared.")
         else:
             # Compute and plot frequency domain data
-            freqs, mag_db, phase_deg, min_phase_deg = compute_frequency_response(
+            freqs, mag_db, phase_deg, min_phase_deg, delta_f = compute_frequency_response(
                 audio_data, sample_rate, state['gate_idx'], state['tukey_alpha'], 
                 args.mic_cal, args.mic_sensitivity, args.v_stimulus,
                 args.distance
@@ -362,6 +437,7 @@ def main():
             state['mag_db'] = mag_db
             state['phase_deg'] = phase_deg
             state['min_phase_deg'] = min_phase_deg
+            state['resolution'] = delta_f
             
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -381,12 +457,13 @@ def main():
                 ax_freq.set_ylabel(mag_ylabel)
                 ax_freq.set_title("Frequency Domain Data - Magnitude")
             
-            ax_freq.set_xlabel("Frequency (Hz)")
+            ax_freq.set_xlabel(f'Frequency (Hz) at {state['resolution']:.3g} Hz resolution')
             state['freq_line_plot'] = [line]
             fig.canvas.draw_idle()
             
             # Construct formatted completion message based on command-line arguments
-            print(f"Frequency domain data computed with the following corrections:")
+            print(f"The computed frequency domain data has a resolution of {delta_f:.3g} Hz")
+            print(f"The SPL level is based on the following:")
             if args.mic_sensitivity is not None:
                 print(f"   \u2022 a microphone sensitivity of {args.mic_sensitivity} mV/Pa")
             if args.mic_cal is not None:
@@ -431,15 +508,27 @@ def main():
                 ax_freq.set_ylabel(mag_ylabel)
                 ax_freq.set_title("Frequency Domain Data - Magnitude")
                 
-            ax_freq.set_xlabel("Frequency (Hz)")
+            ax_freq.set_xlabel(f'Frequency (Hz) at {state['resolution']:.3g} Hz resolution')
             state['freq_line_plot'] = [line]
             fig.canvas.draw_idle()
             print(f"Toggled view to {'Phase (' + ('MinPhase' if state['using_min_phase'] else 'Standard') + ')' if state['showing_phase'] else 'Magnitude'}.")
+            # Update the text box that shows which phase type is active
+            update_phase_indicator()
         else:
             print("No frequency data computed yet. Click 'Compute/Clear' first.")
 
+
+    def update_phase_indicator():
+      """Call this function inside your toggle button callback
+      whenever `using_min_phase` changes state.  """
+      new_text = 'minimum phase' if state['using_min_phase'] else 'regular phase'
+      phase_textbox.set_val(new_text)
+
+
     def handle_min_phase_button(event):
         state['using_min_phase'] = not state['using_min_phase']
+        # Update the text box showing the phase type
+        update_phase_indicator()
         if state['using_min_phase']:
             print("MinPhase enabled.")
         else:
@@ -459,7 +548,7 @@ def main():
             line, = ax_freq.plot(state['freqs'], current_phase, color='g', lw=1.2)
             ax_freq.set_ylabel("Phase (degrees)")
             ax_freq.set_title(title_label)
-            ax_freq.set_xlabel("Frequency (Hz)")
+            ax_freq.set_xlabel(f'Frequency (Hz) at {state['resolution']:.3g} Hz resolution')
             state['freq_line_plot'] = [line]
             fig.canvas.draw_idle()
 
