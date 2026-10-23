@@ -83,7 +83,7 @@ def compute_h1_time_domain(measurement, stimulus):
     h1_time = np.fft.irfft(H1_freq, n=n)
 
     # Optional: Trim back to expected impulse response length if needed
-    return h1_time[:native_n].astype(np.float32)
+    return h1_time[:len_m].astype(np.float32)
 
 
 def plot_results(h1_time, sample_rate, C_f, Cxy):

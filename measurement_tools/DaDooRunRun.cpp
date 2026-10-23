@@ -541,7 +541,7 @@ std::vector<float> generate_inverse_filter(int sample_rate, float chirp_rate, fl
         int rev_idx = num_samples - 1 - i;
         
         // Amplitude modulation for energy flattening across octaves
-        double modulation = std::exp(t * ln_ratio / duration);
+        double modulation = std::exp(-t * ln_ratio / duration);
         
         inv_filter[i] = ideal_sweep[rev_idx] * modulation;
     }

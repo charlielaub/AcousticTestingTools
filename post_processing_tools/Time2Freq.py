@@ -247,132 +247,146 @@ def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq,
 
 
 def run_farina_analysis(
-          recorded_audio,
-          sample_rate,
-          inv_filter,
-          start_freq,
-          gate_end_idx,
-          tukey_alpha,
-          mic_cal_file,
-          mic_sensitivity,
-          v_stimulus,
-          distance,
-          max_harmonic=5
-      ):
-      """
-            function run_farina_analysis:
-            Uses the Farina method to extract linear and nonlinear distortion 
-            responses from a recorded exponential sine sweep.
+        recorded_audio,
+        sample_rate,
+        inv_filter,
+        start_freq,
+        gate_start_idx,
+        gate_end_idx,
+        tukey_alpha,
+        mic_cal_file,
+        mic_sensitivity,
+        v_stimulus,
+        distance,
+        max_harmonic=5
+    ):
+    """
+          function run_farina_analysis:
+          Uses the Farina method to extract linear and nonlinear distortion 
+          responses from a recorded exponential sine sweep.
 
-            Parameters:
-            -----------
-            recorded_audio : numpy.ndarray
-                The raw audio data recorded from the measurement microphone.
-            sample_rate : int
-                The sampling rate of the audio data in Hz.
-            inv_filter : numpy.ndarray
-                The pre-generated inverse filter matching the stimulus sweep.
-            start_freq : float
-                The starting frequency of the logarithmic sweep in Hz.
-            gate_end_idx : int
-                The sample index where the user-defined time-domain reflection window ends.
-            tukey_alpha : float
-                    The shape parameter for the Tukey window applied to each impulse slice.
-            mic_cal_file : str or None
-                Path to the microphone calibration file, or None if unused.
-            mic_sensitivity : float or None
-                Microphone sensitivity in milliVolts per Pascal (mV/Pa), or None if unused.
-            v_stimulus : float
-                The RMS voltage of the playback stimulus.
-            distance : float or None
-                The measurement distance in meters, or None if unused.
-            max_harmonic : int, optional
-                The maximum harmonic order to extract and analyze (default is 5).
+          Parameters:
+          -----------
+          recorded_audio : numpy.ndarray
+              The raw audio data recorded from the measurement microphone.
+          sample_rate : int
+              The sampling rate of the audio data in Hz.
+          inv_filter : numpy.ndarray
+              The pre-generated inverse filter matching the stimulus sweep.
+          start_freq : float
+              The starting frequency of the logarithmic sweep in Hz.
+          gate_start_idx : int
+              The sample index where the user-defined time-domain reflection window begins.
+          gate_end_idx : int
+              The sample index where the user-defined time-domain reflection window ends.
+          tukey_alpha : float
+                  The shape parameter for the Tukey window applied to each impulse slice.
+          mic_cal_file : str or None
+              Path to the microphone calibration file, or None if unused.
+          mic_sensitivity : float or None
+              Microphone sensitivity in milliVolts per Pascal (mV/Pa), or None if unused.
+          v_stimulus : float
+              The RMS voltage of the playback stimulus.
+          distance : float or None
+              The measurement distance in meters, or None if unused.
+          max_harmonic : int, optional
+              The maximum harmonic order to extract and analyze (default is 5).
 
-            Returns:
-            --------
-            dict
-                A dictionary containing frequency response data (frequencies, magnitude in dB, 
-                standard phase, minimum phase, and frequency resolution) for each harmonic 
-                index `k`, as well as the total harmonic distortion percentage ("thd_percent").
-      """ 
-      # 1. Compute sweep parameters from the inverse filter length
-      duration = len(inv_filter) / sample_rate
-      nyquist = 0.5 * sample_rate
-      end_freq = 0.99 * nyquist
-      ln_ratio = np.log(end_freq / start_freq)
+          Returns:
+          --------
+          dict
+              A dictionary containing frequency response data (frequencies, magnitude in dB, 
+              standard phase, minimum phase, and frequency resolution) for each harmonic 
+              index `k`, as well as the total harmonic distortion percentage ("thd_percent").
+    """ 
+    # 1. Compute sweep parameters from the inverse filter length
+    duration = len(inv_filter) / sample_rate
+    nyquist = 0.5 * sample_rate
+    end_freq = 0.99 * nyquist
+    ln_ratio = np.log(end_freq / start_freq)
 
-      # 2. Perform Fast Convolution (Deconvolution)
-      full_ir = scipy.signal.fftconvolve(recorded_audio, inv_filter, mode='full')
-      linear_peak_idx = np.argmax(np.abs(full_ir))
+    # 2. Perform Fast Convolution (Deconvolution)
+    full_ir = scipy.signal.fftconvolve(recorded_audio, inv_filter, mode='full')
+    linear_peak_idx = np.argmax(np.abs(full_ir))
 
-      # Run an overlap check on the harmonics (which pre-calculates all peak indices!)
-      peak_indices, warnings_list, overlaps = check_harmonic_window_overlaps(
-          full_ir, inv_filter, sample_rate, start_freq, gate_end_idx, max_harmonic
-      )
-      
-      # Print warnings to the console if any were found
-      if warnings_list:
-          for w in warnings_list:
-              print(w)
+    # Calculate peak indices for all harmonics
+    peak_indices = {}
+    for k in range(1, max_harmonic + 1):
+        if k == 1:
+            sample_offset = 0
+        else:
+            delta_t = (duration / ln_ratio) * np.log(k)
+            sample_offset = int(round(delta_t * sample_rate))
+        peak_indices[k] = linear_peak_idx - sample_offset
 
-      harmonic_results = {}
-      
-      # 3. Extract and process each harmonic
-      for k in range(1, max_harmonic + 1):
-          # Skip processing if this harmonic's window overlaps with the next one
-          if k > 1 and overlaps[k] > 0:
-              print(f"Skipping Harmonic {k} due to window overlap of ({overlaps[k]} samples).")
-              continue  # Skips to the next iteration so bad data isn't processed
+    # Determine window length and the pre-roll distance from the H1 peak
+    h1_window_len = gate_end_idx - gate_start_idx
+    h1_pre_roll = peak_indices[1] - gate_start_idx
 
-          # use the offsets and peak indices already calculated in check_harmonic_window_overlaps
-          peak_idx = peak_indices[k]
-          start_idx = max(0, peak_idx)
-          end_idx = min(len(full_ir), peak_idx + gate_end_idx)
+    harmonic_results = {}
+    
+    # 3. Extract and process each harmonic
+    for k in range(1, max_harmonic + 1):
+        peak_idx = peak_indices[k]
+        
+        # Correctly position the window relative to each harmonic's unique peak
+        start_idx = max(0, peak_idx - h1_pre_roll)
+        end_idx = min(len(full_ir), start_idx + h1_window_len)
 
-          segment = full_ir[start_idx:end_idx]
+        segment = full_ir[start_idx:end_idx]
 
-          # Apply calibration only to the fundamental (k=1)
-          current_mic_cal = mic_cal_file if k == 1 else None
-          current_mic_sens = mic_sensitivity if k == 1 else None
-          current_dist = distance if k == 1 else None
+        # Zero-pad to preserve absolute time delay for the phase response
+        padded_segment = np.zeros_like(full_ir)
+        padded_segment[start_idx:start_idx + len(segment)] = segment
 
-          freqs, mag_db, phase, min_phase, delta_f = compute_frequency_response(
-              audio_data=segment,
-              sample_rate=sample_rate,
-              gate_end_idx=len(segment),
-              tukey_alpha=tukey_alpha,
-              mic_cal_file=current_mic_cal,
-              mic_sensitivity=current_mic_sens,
-              v_stimulus=v_stimulus,
-              distance=current_dist
-          )
+        # Apply calibration only to the fundamental (k=1)
+        current_mic_cal = mic_cal_file if k == 1 else None
+        current_mic_sens = mic_sensitivity if k == 1 else None
+        current_dist = distance if k == 1 else None
 
-          harmonic_results[k] = {
-              "freqs": freqs,
-              "mag_db": mag_db,
-              "phase": phase,
-              "min_phase": min_phase,
-              "delta_f": delta_f
-          }
+        freqs, mag_db, phase, min_phase, delta_f = compute_frequency_response(
+            audio_data=padded_segment,
+            sample_rate=sample_rate,
+            gate_end_idx=len(full_ir),
+            tukey_alpha=tukey_alpha,
+            mic_cal_file=current_mic_cal,
+            mic_sensitivity=current_mic_sens,
+            v_stimulus=v_stimulus,
+            distance=current_dist
+        )
 
-      # 4. Compute Total Harmonic Distortion (THD %)
-      # Ensure harmonic 1 and at least one other harmonic are present
-      if 1 in harmonic_results:
-          fund_mag = harmonic_results[1]["mag_db"]
-          distortion_sum_sq = 0.0
+        # Apply correct Farina scaling: f/k frequency axis mapping
+        corrected_freqs = freqs / k
+        corrected_mag_db = mag_db.copy()
 
-          for k in range(2, max_harmonic + 1):
-              if k in harmonic_results:
-                  harm_mag = harmonic_results[k]["mag_db"]
-                  rel_mag_linear = 10.0 ** ((harm_mag - fund_mag) / 20.0)
-                  distortion_sum_sq += rel_mag_linear ** 2
+        # Corrected amplitude adjustment for harmonics (subtraction fixes the "too low" levels)
+        if k > 1:
+            corrected_mag_db -= 20.0 * np.log10(k)
 
-          harmonic_results["thd_percent"] = 100.0 * np.sqrt(distortion_sum_sq)
-      else:
-          harmonic_results["thd_percent"] = None
+        harmonic_results[k] = {
+            "freqs": corrected_freqs,
+            "mag_db": corrected_mag_db,
+            "phase_deg": phase,
+            "min_phase_deg": min_phase,
+            "delta_f": delta_f / k
+        }
 
-      return harmonic_results
+    # 4. Compute Total Harmonic Distortion (THD %)
+    if 1 in harmonic_results:
+        fund_mag = harmonic_results[1]["mag_db"]
+        distortion_sum_sq = 0.0
+
+        for k in range(2, max_harmonic + 1):
+            if k in harmonic_results:
+                harm_mag = harmonic_results[k]["mag_db"]
+                rel_mag_linear = 10.0 ** ((harm_mag - fund_mag) / 20.0)
+                distortion_sum_sq += rel_mag_linear ** 2
+
+        harmonic_results["thd_percent"] = 100.0 * np.sqrt(distortion_sum_sq)
+    else:
+        harmonic_results["thd_percent"] = None
+
+    return harmonic_results
 
 
 
@@ -459,11 +473,8 @@ def main():
     args = parse_arguments()
     
     try:
-        # Read the pre-calculated H1 impulse response 
-        sample_rate, H1_impulse = read_wav_file(args.impulse_data)
-        
         # Read the raw microphone data and Farina inverse filter
-        _, mic_data = read_wav_file(args.mic_data)
+        sample_rate, mic_data = read_wav_file(args.mic_data)
         _, inv_filter = read_wav_file(args.farina_filter)
         
     except FileNotFoundError as e:
@@ -473,11 +484,14 @@ def main():
         print(f"Error reading WAV file: {e}")
         return
     
-    total_duration_ms = (len(H1_impulse) / sample_rate) * 1000.0
-    print(f"Processing impulse response WAV: {args.impulse_data}")
+    # Compute the full impulse response using Farina deconvolution
+    print("Computing full impulse response via convolution...")
+    full_ir = scipy.signal.fftconvolve(mic_data, inv_filter, mode='full')
+    
+    total_duration_ms = (len(full_ir) / sample_rate) * 1000.0
     print(f"Sample Rate: {sample_rate} Hz | Total Duration: {total_duration_ms:.2f} ms")
 
-    time_axis = np.arange(len(H1_impulse)) / sample_rate
+    time_axis = np.arange(len(full_ir)) / sample_rate
     
     # Determine y-axis label for magnitude based on whether mic sensitivity is supplied
     if (
@@ -496,19 +510,28 @@ def main():
     plt.subplots_adjust(bottom=0.23)
     
     # Plot Time Domain Impulse Response Data
-    #   The H1-estimated IR is used only for gate placement
-    ax_time.plot(time_axis * 1000, H1_impulse, color='b', lw=1, label='IR')
-    ax_time.set_title(f"Impulse Response: {args.impulse_data} (Time Domain)")
+    ax_time.plot(time_axis * 1000, full_ir, color='b', lw=1, label='IR')
+    ax_time.set_title("Impulse Response (Time Domain)")
     ax_time.set_ylabel("Amplitude")
     ax_time.grid(True)
     
+    # Initial gate indices
     initial_gate_time_ms = time_axis[-1] * 1000
-    initial_gate_idx = len(H1_impulse)
-    gate_line = ax_time.axvline(x=initial_gate_time_ms, color='g', linestyle='--', lw=1.5, label='Window End')
+    initial_gate_idx = len(full_ir)
+    initial_start_idx = 0  # Or your default pre-roll start sample
+
+    initial_start_time_ms = (initial_start_idx / sample_rate) * 1000.0
+
+    # Add lines for both start and end gates
+    start_line = ax_time.axvline(x=initial_start_time_ms, color='orange', linestyle='--', lw=1.5, label='Window Start')
+    gate_line  = ax_time.axvline(x=initial_gate_time_ms,  color='g',     linestyle='--', lw=1.5, label='Window End')
     
     # State variables
     state = {
-        'gate_idx': initial_gate_idx,
+        'gate_idx': initial_gate_idx,            # Existing end gate index
+        'gate_start_idx': initial_start_idx,    # Add this to store your window start index
+        'selecting_gate_step': 0,               # 0 = not selecting, 1 = waiting for start click, 2 = waiting for end click
+        'temp_start_time_ms': 0.0,              # Temporary storage for visual feedback
         'selecting_gate': False,
         'harmonic_results': None,
         'selected_harmonic': 'H1',
@@ -516,7 +539,7 @@ def main():
         'freq_line_plot': None,
         'showing_phase': False,
         'using_min_phase': False,
-        'tukey_alpha': 0.25,
+        'tukey_alpha': 0.02,
         'resolution': None
     }
     
@@ -540,11 +563,11 @@ def main():
     btn_y = 0.03
     btn_h = 0.04
     
-    ax_btn_gate       = plt.axes([0.03,  btn_y, 0.14, btn_h])
-    ax_btn_calc       = plt.axes([0.19,  btn_y, 0.16, btn_h])
-    ax_btn_view       = plt.axes([0.37,  btn_y, 0.18, btn_h])
-    ax_btn_min        = plt.axes([0.57,  btn_y, 0.22, btn_h])
-    ax_btn_save_exit  = plt.axes([0.81,  btn_y, 0.15, btn_h])
+    ax_btn_gate         = plt.axes([0.03,  btn_y, 0.14, btn_h])
+    ax_btn_calc         = plt.axes([0.19,  btn_y, 0.16, btn_h])
+    ax_btn_view         = plt.axes([0.37,  btn_y, 0.18, btn_h])
+    ax_btn_min          = plt.axes([0.57,  btn_y, 0.22, btn_h])
+    ax_btn_save_exit    = plt.axes([0.81,  btn_y, 0.15, btn_h])
     
     btn_gate = Button(ax_btn_gate, 'Place Gate', color='aliceblue', hovercolor='palegreen')
     btn_calc = Button(ax_btn_calc, 'Compute/Clear', color='aliceblue', hovercolor='palegreen')
@@ -581,10 +604,23 @@ def main():
 
     def update_tukey_visual(event=None):
         ylim = ax_time.get_ylim()
-        y_top = ylim[1]
-        win = scipy.signal.get_window(('tukey', state['tukey_alpha']), state['gate_idx'])
-        window_line.set_xdata(time_axis[:state['gate_idx']] * 1000)
-        window_line.set_ydata(win * (0.95 * y_top))
+        y_top = ylim[1] if ylim[1] != 0 else 1.0
+        
+        start_idx = max(0, state.get('gate_start_idx', 0))
+        end_idx = state['gate_idx']
+        
+        if start_idx < end_idx:
+            win_len = end_idx - start_idx
+            win = scipy.signal.get_window(('tukey', state['tukey_alpha']), win_len)
+            
+            window_line.set_xdata(time_axis[start_idx:end_idx] * 1000)
+            window_line.set_ydata(win * (0.95 * y_top))
+            
+            start_time_ms = (start_idx / sample_rate) * 1000.0
+            end_time_ms = (end_idx / sample_rate) * 1000.0
+            start_line.set_xdata([start_time_ms, start_time_ms])
+            gate_line.set_xdata([end_time_ms, end_time_ms])
+            
         fig.canvas.draw_idle()
 
     ax_time.callbacks.connect('ylim_changed', update_tukey_visual)
@@ -611,7 +647,6 @@ def main():
             if 2 <= val <= 6:
                 state['hd_max'] = val
                 print(f"HD MAX updated to: {state['hd_max']}")
-                # Reset to H1 and refresh plot
                 state['selected_harmonic'] = 'H1'
                 textbox_dataset.set_val('H1')
                 if state['harmonic_results'] is not None:
@@ -625,31 +660,61 @@ def main():
     textbox_hd_max.on_submit(submit_hd_max)
 
     def on_click_time_plot(event):
-        if state['selecting_gate'] and event.inaxes == ax_time:
+        if state['selecting_gate_step'] > 0 and event.inaxes == ax_time:
             clicked_time_ms = event.xdata
             if clicked_time_ms is not None and clicked_time_ms >= 0:
-                state['gate_idx'] = int((clicked_time_ms / 1000.0) * sample_rate)
-                state['gate_idx'] = max(10, min(state['gate_idx'], len(H1_impulse)))
-                actual_time_ms = (state['gate_idx'] / sample_rate) * 1000.0
-                gate_line.set_xdata([actual_time_ms, actual_time_ms])
-                update_tukey_visual()
-                print(f"Window end placed at: {actual_time_ms:.2f} ms (sample {state['gate_idx']})")
-            state['selecting_gate'] = False
-            btn_gate.label.set_color('black')
-            ax_btn_gate.set_facecolor('aliceblue')
-            fig.canvas.draw_idle()
+                clicked_sample = int((clicked_time_ms / 1000.0) * sample_rate)
+                
+                if state['selecting_gate_step'] == 1:
+                    state['temp_start_time_ms'] = clicked_time_ms
+                    print(f"Start taper end placed at: {clicked_time_ms:.2f} ms. Now click the Window End (Reflection limit).")
+                    state['selecting_gate_step'] = 2
+                    
+                elif state['selecting_gate_step'] == 2:
+                    clicked_onset_sample = int((state['temp_start_time_ms'] / 1000.0) * sample_rate)
+                    end_sample = clicked_sample
+                    
+                    if end_sample > clicked_onset_sample:
+                        temp_window_len = end_sample - clicked_onset_sample
+                        taper_len = int(temp_window_len * state['tukey_alpha'] / 2.0)
+                        true_start_sample = max(0, clicked_onset_sample - taper_len)
+                        
+                        state['gate_start_idx'] = true_start_sample
+                        state['gate_idx'] = end_sample
+                        
+                        actual_start_ms = (true_start_sample / sample_rate) * 1000.0
+                        clicked_onset_ms = state['temp_start_time_ms']
+                        actual_end_ms = (end_sample / sample_rate) * 1000.0
+                        
+                        print(f"Window Updated!")
+                        print(f"  - Taper starts at: {actual_start_ms:.2f} ms")
+                        print(f"  - Taper ends (Signal Onset): {clicked_onset_ms:.2f} ms")
+                        print(f"  - Window ends: {actual_end_ms:.2f} ms")
+                        
+                        start_line.set_xdata([actual_start_ms, actual_start_ms])
+                        gate_line.set_xdata([actual_end_ms, actual_end_ms])
+                        update_tukey_visual()
+                    else:
+                        print("Error: Window end must be after the window start. Try again.")
+                    
+                    state['selecting_gate_step'] = 0
+                    btn_gate.label.set_color('black')
+                    ax_btn_gate.set_facecolor('aliceblue')
+                    fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect('button_press_event', on_click_time_plot)
     
     def handle_gate_button(event):
-        state['selecting_gate'] = not state['selecting_gate']
-        if state['selecting_gate']:
+        if state['selecting_gate_step'] == 0:
+            state['selecting_gate_step'] = 1
             btn_gate.label.set_color('red')
             ax_btn_gate.set_facecolor('#ffcccc')
-            print("Click on the time domain plot to place the window end line.")
+            print("Step 1/2: Click the time plot where the signal leaves the baseline (Start taper end).")
         else:
+            state['selecting_gate_step'] = 0
             btn_gate.label.set_color('black')
             ax_btn_gate.set_facecolor('aliceblue')
+            print("Gate selection cancelled.")
         fig.canvas.draw_idle()
         
     def refresh_frequency_plot():
@@ -733,6 +798,7 @@ def main():
                 sample_rate=sample_rate,
                 inv_filter=inv_filter,
                 start_freq=20.0,
+                gate_start_idx=state['gate_start_idx'],
                 gate_end_idx=state['gate_idx'],
                 tukey_alpha=state['tukey_alpha'],
                 mic_cal_file=args.mic_cal,
@@ -742,7 +808,11 @@ def main():
                 max_harmonic=state['hd_max']
             )
             state['harmonic_results'] = results
-            state['resolution'] = results[1]['delta_f']
+            
+            # Calculate resolution based on window duration
+            window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
+            state['resolution'] = 1.0 / window_duration
+            
             refresh_frequency_plot()
             print(f"Analysis complete! Resolution: {state['resolution']:.3g} Hz")
 
@@ -797,6 +867,7 @@ def main():
                     sample_rate=sample_rate,
                     inv_filter=inv_filter,
                     start_freq=20.0,
+                    gate_start_idx=state['gate_start_idx'],
                     gate_end_idx=state['gate_idx'],
                     tukey_alpha=state['tukey_alpha'],
                     mic_cal_file=args.mic_cal,
@@ -806,12 +877,14 @@ def main():
                     max_harmonic=state['hd_max']
                 )
                 state['harmonic_results'] = results
-                state['resolution'] = results[1]['delta_f']
+                
+                # Calculate resolution based on window duration
+                window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
+                state['resolution'] = 1.0 / window_duration
 
             res = state['harmonic_results']
             base_name = args.output  # args.output holds the base filename
-
-            # Save FRD files for each harmonic up to HD MAX
+            
             for k in range(1, state['hd_max'] + 1):
                 if k in res:
                     h_data = res[k]
@@ -819,7 +892,6 @@ def main():
                     filename_k = f"{base_name}_HD{k}.frd"
                     write_frd_file(filename_k, h_data['freqs'], h_data['mag_db'], phase_to_save)
 
-            # Save Plots at 600 DPI (PNG format)
             print("Saving plots at 600 DPI in png file format...")
             
             # Plot A: Fundamental Magnitude (_FREQ.png)
