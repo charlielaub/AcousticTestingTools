@@ -281,7 +281,7 @@ AppArgs parse_arguments(int argc, char* argv[]) {
         // --- Catch-All Error Case ---
         else {
             std::cerr << "Error: Unknown or unrecognized command line option: '" << arg << "'\n";
-            show_help_info(argv);
+            show_help_info(argv[0]);
             std::exit(1);
         }
     }
