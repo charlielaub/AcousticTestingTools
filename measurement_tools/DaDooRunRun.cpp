@@ -116,7 +116,7 @@ void show_help_info(const char* prog_name) {
               << "Options:\n"
               << "  --mic_output_file, -m <file>       destination WAV file for the mic data (default: mic_data.wav)\n"
               << "  --stimulus_output_file, -s <file>  destination WAV file for the stimulus\n"
-              << "  --farina_filter_file, -s <file>    destination WAV file for the Farina inverse filter\n"
+              << "  --farina_filter_file, -f <file>    destination WAV file for the Farina inverse filter\n"
               << "  --level <float>                    RMS stimulus level in dB <= 0.0 (default: -10.0)\n"
               << "  --sample_rate <int>                Sampling rate in Hz (default: 48000)\n"
               << "  --chirp_rate <float>               Chirp rate in seconds per decade of frequency (default: 2.0)\n"

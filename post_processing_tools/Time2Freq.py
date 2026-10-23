@@ -20,6 +20,7 @@ from scipy.io import wavfile as wav
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox, RadioButtons
 from matplotlib.ticker import LogLocator
+import math
 
 
 def parse_arguments():

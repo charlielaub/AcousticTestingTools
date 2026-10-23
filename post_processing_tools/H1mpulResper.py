@@ -17,7 +17,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.io import wavfile
 import scipy.fft
-
+from scipy import signal
 
 
 def read_wav_file(file_path):
@@ -111,10 +111,10 @@ def plot_results(h1_time, sample_rate, C_f, Cxy):
     ax2.semilogx(C_f, Cxy, label="Magnitude Squared Coherence", color="darkred", linewidth=1.5)
     ax2.set_title("Coherence Function")
     ax2.set_xlabel("Frequency (Hz)")
-    ax2.set_ylabel("Coherence ($\gamma^2$)")
+    ax2.set_ylabel("Coherence Gamma")
     ax2.set_ylim(-0.05, 1.05)  # Strict mathematical bounds for coherence
     ax2.grid(True, which="both", linestyle="--", alpha=0.6)
-    ax2.legend(loc="lower left")
+    ax2.legend(loc="upper left")
 
     # Adjust layout to prevent overlapping text and render
     plt.tight_layout()
@@ -189,7 +189,8 @@ def main():
     #   x: stimulus, y: response, fs: sampling frequency
     # Calculate an optimal nperseg for Welch's method based on signal length.
     #   With 50% overlap, number of segments is roughly (2 * length) / nperseg
-    ideal_nperseg = (2 * signal_length) / target_segments
+    target_segments = 10
+    ideal_nperseg = (2 * len(y)) / target_segments
     # Find the nearest power of 2 for FFT efficiency
     power_of_2 = 2 ** np.round(np.log2(ideal_nperseg))
     # Clamp to practical bounds (e.g., min 2048 for resolution, max 32768 to ensure enough averaging)
