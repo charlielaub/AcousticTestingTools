@@ -73,6 +73,115 @@ def parse_arguments():
 
 
 
+def compute_frequency_response(
+    audio_data,
+    sample_rate,
+    gate_end_idx,
+    tukey_alpha,
+    mic_cal_file,
+    mic_sensitivity,
+    v_stimulus,
+    distance,
+):
+    """Applies a Tukey window, computes standard FFT and minimum phase FFT,
+
+    applies correction factors and returns frequencies, magnitude (dB),
+    standard phase (deg), minimum phase (deg), and delta_frequency (Hz).
+    """
+    gate_end_idx = max(10, min(gate_end_idx, len(audio_data)))
+
+    # Get Tukey window using scipy.signal.get_window
+    win = scipy.signal.get_window(('tukey', tukey_alpha), gate_end_idx)
+
+    # Restrict windowed_data strictly to the gated segment length
+    windowed_data = audio_data[:gate_end_idx].astype(np.float32) * win
+
+    # Zero-pad for smoother frequency resolution in the FFT
+    desired_len = max(2048, 2 * len(windowed_data))
+    n_fft = 1 << math.ceil(math.log2(desired_len))
+
+    # Standard FFT response
+    fft_result = np.fft.rfft(windowed_data, n=n_fft)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
+
+    mag = np.abs(fft_result)
+    mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))  # Prevent log(0)
+    phase_deg = np.angle(fft_result, deg=True)
+
+    # Apply Microphone Sensitivity Scaling
+    if mic_sensitivity is not None and mic_sensitivity > 0:
+        sensitivity_v_pa = mic_sensitivity / 1000.0  # mV/Pa to V/Pa
+        p_ref = 20e-6  # 20 uPa reference pressure
+        spl_offset = -20.0 * np.log10(sensitivity_v_pa * p_ref)
+        mag_db += spl_offset
+
+    # Apply Microphone Calibration File Compensation
+    if mic_cal_file is not None:
+        cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
+        mag_db -= cal_corrections
+
+    # Scale for stimulus RMS voltage
+    mag_db -= 20.0 * np.log10(v_stimulus)
+
+    # Scale for measurement distance
+    if distance is not None:
+        mag_db += 20.0 * np.log10(distance)
+
+    # Compute Minimum Phase response on the active windowed data
+    try:
+        min_phase_signal = scipy.signal.minimum_phase(
+            windowed_data, method='homomorphic', half=False
+        )
+        min_fft_result = np.fft.rfft(min_phase_signal, n=n_fft)
+        min_phase_deg = np.angle(min_fft_result, deg=True)
+    except Exception:
+        min_phase_deg = phase_deg.copy()
+
+    # --- Frequency Resolution Calculation via NCC & IFFT ---
+    try:
+        # 1. Generate minimum phase time response using amplitude and minimum phase
+        min_phase_rad = np.deg2rad(min_phase_deg)
+        min_complex_spectrum = mag * np.exp(1j * min_phase_rad)
+        impulse_minphase = np.fft.irfft(min_complex_spectrum, n=n_fft)
+
+        # Truncate impulse_minphase back to the window length for accurate cross-correlation
+        impulse_minphase_trimmed = impulse_minphase[: len(windowed_data)]
+
+        # 2. Compute Normalized Cross-Correlation (NCC) between the gated data and min-phase impulse
+        f = windowed_data - np.mean(windowed_data)
+        g = impulse_minphase_trimmed - np.mean(impulse_minphase_trimmed)
+        xcorr = scipy.signal.correlate(f, g, mode='full')
+        norm = np.sqrt(np.sum(f**2) * np.sum(g**2))
+        if norm > 0:
+            xcorr /= norm
+
+        # 3. Find peak position, convert to time, and calculate delta frequency
+        ncc_max_pos = np.argmax(xcorr)
+        # In 'full' mode, the zero-lag/start alignment offset is len(g) - 1
+        peak_index_offset = abs(ncc_max_pos - (len(g) - 1))
+        
+        ncc_max_time = float(peak_index_offset) / sample_rate
+        gate_end_time = float(gate_end_idx) / sample_rate
+
+        time_diff = gate_end_time - ncc_max_time
+        delta_frequency = (
+            float(1.0 / time_diff) if time_diff > 0 else float(sample_rate / n_fft)
+        )
+    except Exception:
+        delta_frequency = float(sample_rate / n_fft)
+
+    valid_idx = freqs <= (sample_rate / 2.0)
+    return (
+        freqs[valid_idx],
+        mag_db[valid_idx],
+        phase_deg[valid_idx],
+        min_phase_deg[valid_idx],
+        delta_frequency,
+    )
+
+
+
+
 def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq, gate_end_idx, max_harmonic=5):
     """
     Checks if the given gate_end_idx causes overlapping windows between 
