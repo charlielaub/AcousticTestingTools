@@ -5,11 +5,12 @@
 /*   Licensed under the MIT License. See LICENSE file in the project root     */
 /*     for full license information.                                          */
 /*                                                                            */
-/*   Generates a windowed and filtered chirp stimulus signal. Plays the       */
+/*   The program generates a windowed log chirp stimulus signal. Plays the    */
 /*   signal via two output channels while recording from two input channels.  */
 /*   The test signal can be repeated N times with silence of a user defined   */
 /*   duration in between runs. The N time records are aligned and averaged    */
-/*   and the data is saved to WAV files in FLOAT32 format.                    */
+/*   and the data is saved to WAV files in FLOAT32 format. The Farina method  */
+/*   inverse filter can also be saved to a WAV file for post-processing.      */
 /*                                                                            */
 /*   Invoke with -h or --help to see a list of all program options.           */
 /*                                                                            */
@@ -32,6 +33,7 @@
 #include <chrono>
 #include <thread>
 #include <memory>
+#include <stdexcept>
 #include <portaudio.h>
 #include <Eigen/Dense>
 
@@ -58,14 +60,16 @@
 struct AppArgs {
     std::string mic_output_file = "mic_data.wav";
     std::string stimulus_output_file = "";
+    std::string farina_filter_file = "";
     int sample_rate = 48000;
     float chirp_rate = 2.0f;
     float start_freq = 1.0f;
     int repetitions = 1;
     float alignment_window = 5.0;
     float warm_up_delay = 3.0f;
+    float rt60 = 3.0f;
     float mean_wait = 1.0f;
-    float level = -6.0f; // Default level in dB (must be <= 0.0)
+    float level = -10.0f; // Default level in dB (must be <= 0.0)
     int api_idx = -1;
     int input_device_idx = -1;
     int output_device_idx = -1;
@@ -82,12 +86,14 @@ struct AppArgs {
         
         std::cout << std::setw(name_width) << "mic output file"      << " : " << mic_output_file << "\n";
         std::cout << std::setw(name_width) << "stimulus output file" << " : " << (stimulus_output_file.empty() ? "(none)" : stimulus_output_file) << "\n";
+        std::cout << std::setw(name_width) << "Farina filter file"   << " : " << (farina_filter_file.empty() ? "(none)" : farina_filter_file) << "\n";
         std::cout << std::setw(name_width) << "sample rate"          << " : " << sample_rate << " Hz\n";
         std::cout << std::setw(name_width) << "chirp rate"           << " : " << chirp_rate << " seconds per decade Hz\n";
         std::cout << std::setw(name_width) << "start freq"           << " : " << start_freq << " Hz\n";
         std::cout << std::setw(name_width) << "repetitions"          << " : " << repetitions << "\n";
         std::cout << std::setw(name_width) << "alignment window"     << " : " << alignment_window << " milliseconds\n";
         std::cout << std::setw(name_width) << "warm up delay"        << " : " << warm_up_delay << " seconds\n";
+        std::cout << std::setw(name_width) << "room decay time"      << " : " << rt60 << " seconds\n";
         std::cout << std::setw(name_width) << "mean wait"            << " : " << mean_wait << " seconds\n";
         std::cout << std::setw(name_width) << "level"                << " : " << level << " dB\n";
         std::cout << std::setw(name_width) << "api idx"              << " : " << api_idx << "\n";
@@ -102,44 +108,30 @@ struct AppArgs {
 };
 
 
-struct AudioContext {
-    const std::vector<float>& stimulus;
-    std::vector<std::vector<float>>& ref_history;
-    std::vector<std::vector<float>>& mic_history;
-    
-    int current_rep = 0;
-    int current_frame = 0;
-    int total_samples = 0;
-    int pa_in_channels = 2;
-    int pa_out_channels = 2;
-    int ch_in0 = 0;
-    int ch_in1 = 1;
-    bool is_warming_up = true;
-    bool measurement_complete = false;
-};
-
 
 // Display Usage / Help Information
 void show_help_info(const char* prog_name) {
     std::cout << "Acoustic Testing Measurement Tool\n\n"
               << "Usage: " << prog_name << " [options]\n\n"
               << "Options:\n"
-              << "  --mic_output_file, --om <file>   WAV file for mic data (default: mic_data.wav)\n"
-              << "  --stimulus_output_file, --os <file> WAV file for stimulus reference\n"
-              << "  --level <float>                 Max stimulus level in dB <= 0.0 (default: -6.0)\n"
-              << "  --sample_rate <int>             Sampling rate in Hz (default: 48000)\n"
-              << "  --chirp_rate <float>            Chirp rate in seconds per decade of frequency (default: 2.0)\n"
-              << "  --start_freq <float>            Start frequency in Hz (default: 1.0)\n"
-              << "  --repetitions <int>             Number of measurement runs (default: 1)\n"
-              << "  --alignment_window <float>      Cross-Correlation Alignment Window in milliseconds (default: 5.0)\n"
-              << "  --warm_up_delay <float>         Length of DAC warm-up delay in seconds (default: 3.0)\n"
-              << "  --mean_wait <float>             Average pause between runs in seconds (default: 3.0)\n"
-              << "  --api_idx <int>                 PortAudio host API index\n"
-              << "  --input_device_idx <int>        PortAudio hardware input device index\n"
-              << "  --output_device_idx <int>       PortAudio hardware output device index\n"
-              << "  --input_channels <id1> <id2>    Two physical input channel indices\n"
-              << "  --output_channels <id1> <id2>   Two physical output channel indices\n"
-              << "  --help, -h                      Display this help message and exit\n\n"
+              << "  --mic_output_file, -m <file>       destination WAV file for the mic data (default: mic_data.wav)\n"
+              << "  --stimulus_output_file, -s <file>  destination WAV file for the stimulus\n"
+              << "  --farina_filter_file, -s <file>    destination WAV file for the Farina inverse filter\n"
+              << "  --level <float>                    RMS stimulus level in dB <= 0.0 (default: -10.0)\n"
+              << "  --sample_rate <int>                Sampling rate in Hz (default: 48000)\n"
+              << "  --chirp_rate <float>               Chirp rate in seconds per decade of frequency (default: 2.0)\n"
+              << "  --start_freq <float>               Start frequency in Hz (default: 1.0)\n"
+              << "  --repetitions <int>                Number of measurement runs (default: 1)\n"
+              << "  --alignment_window <float>         Cross-Correlation Alignment Window in milliseconds (default: 5.0)\n"
+              << "  --warm_up_delay <float>            Length of DAC warm-up delay in seconds (default: 3.0)\n"
+              << "  --rt60 <float>                     Room decay time in seconds (default: 3.0)\n"
+              << "  --mean_wait <float>                Average pause between runs in seconds (default: 3.0)\n"
+              << "  --api_idx <int>                    PortAudio host API index\n"
+              << "  --input_device_idx <int>           PortAudio hardware input device index\n"
+              << "  --output_device_idx <int>          PortAudio hardware output device index\n"
+              << "  --input_channels <id1> <id2>       Two physical input channel indices\n"
+              << "  --output_channels <id1> <id2>      Two physical output channel indices\n"
+              << "  --help, -h                         Display this help message and exit\n\n"
               << "NOTES:\n"
               << "    The command line parameters may be provided in any order.\n"
               << "    The first input channel records the stimulus signal.\n"
@@ -147,47 +139,156 @@ void show_help_info(const char* prog_name) {
 }
 
 
-// Command Line Parsing
+
+// Helper to validate and convert an integer
+// minAllowed allows us to enforce either > 0 (strictly positive) or >= 0 (zero or greater)
+bool parseAndValidateInt(const std::string& argName, const char* strValue, int& outValue, int minAllowed) {
+    try {
+        size_t idx = 0;
+        int val = std::stoi(strValue, &idx);
+        if (strValue[idx] != '\0') {
+            std::cerr << "Error: Trailing characters in value for " << argName << ": '" << strValue << "'\n";
+            return false;
+        }
+        if (val < minAllowed) {
+            std::cerr << "Error: " << argName << " must be an integer " 
+                      << (minAllowed == 0 ? "zero or greater" : "greater than 0") 
+                      << ". Got: " << val << "\n";
+            return false;
+        }
+        outValue = val;
+        return true;
+    } catch (const std::exception&) {
+        std::cerr << "Error: Invalid integer format for " << argName << ": '" << strValue << "'\n";
+        return false;
+    }
+}
+
+// Helper to validate and convert a float
+bool parseAndValidateFloat(const std::string& argName, const char* strValue, float& outValue, bool mustBePositive = true) {
+    try {
+        size_t idx = 0;
+        float val = std::stof(strValue, &idx);
+        if (strValue[idx] != '\0') {
+            std::cerr << "Error: Trailing characters in value for " << argName << ": '" << strValue << "'\n";
+            return false;
+        }
+        if (mustBePositive && val <= 0.0f) {
+            std::cerr << "Error: " << argName << " must be a positive number greater than 0.0. Got: " << val << "\n";
+            return false;
+        }
+        outValue = val;
+        return true;
+    } catch (const std::exception&) {
+        std::cerr << "Error: Invalid numeric format for " << argName << ": '" << strValue << "'\n";
+        return false;
+    }
+}
+
 AppArgs parse_arguments(int argc, char* argv[]) {
     AppArgs args;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        
         if (arg == "--help" || arg == "-h") {
-            show_help_info(argv[0]);
+            show_help_info(argv);
             std::exit(0);
         }
-        else if ((arg == "--mic_output_file" || arg == "--om") && i + 1 < argc) args.mic_output_file = argv[++i];
-        else if ((arg == "--stimulus_output_file" || arg == "--os") && i + 1 < argc) args.stimulus_output_file = argv[++i];
-        else if (arg == "--sample_rate" && i + 1 < argc) args.sample_rate = std::stoi(argv[++i]);
-        else if (arg == "--chirp_rate" && i + 1 < argc) args.chirp_rate = std::stof(argv[++i]);
-        else if (arg == "--start_freq" && i + 1 < argc) args.start_freq = std::stof(argv[++i]);
-        else if (arg == "--repetitions" && i + 1 < argc) args.repetitions = std::stoi(argv[++i]);
-        else if (arg == "--alignment_window" && i + 1 < argc) args.alignment_window = std::stoi(argv[++i]);
-        else if (arg == "--warm_up_delay" && i + 1 < argc) args.warm_up_delay = std::stoi(argv[++i]);
-        else if (arg == "--mean_wait" && i + 1 < argc) args.mean_wait = std::stof(argv[++i]);
-        else if (arg == "--level" && i + 1 < argc) {
-            float parsed_level = std::stof(argv[++i]);
-            if (parsed_level > 0.0f) {
-                std::cerr << "Warning: Level must be 0 dB or less. Restoring default value of -6.0 dB.\n";
-                args.level = -6.0f;
-            } else {
-                args.level = parsed_level;
+        // --- String outputs ---
+        else if (arg == "--mic_output_file" || arg == "-m") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            args.mic_output_file = argv[++i];
+        }
+        else if (arg == "--stimulus_output_file" || arg == "-s") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            args.stimulus_output_file = argv[++i];
+        }
+        else if (arg == "--farina_filter_file" || arg == "-f") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            args.farina_filter_file = argv[++i];
+        }
+        
+        // --- Strictly positive integers (> 0) ---
+        else if (arg == "--sample_rate") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateInt(arg, argv[++i], args.sample_rate, 1)) std::exit(1);
+        }
+        else if (arg == "--repetitions") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateInt(arg, argv[++i], args.repetitions, 1)) std::exit(1);
+        }
+        
+        // --- Strictly positive floats (> 0.0) ---
+        else if (arg == "--chirp_rate") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateFloat(arg, argv[++i], args.chirp_rate, true)) std::exit(1);
+        }
+        else if (arg == "--start_freq") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateFloat(arg, argv[++i], args.start_freq, true)) std::exit(1);
+        }
+        else if (arg == "--alignment_window") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateFloat(arg, argv[++i], args.alignment_window, true)) std::exit(1);
+        }
+        else if (arg == "--warm_up_delay") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateFloat(arg, argv[++i], args.warm_up_delay, true)) std::exit(1);
+        }
+        else if (arg == "--rt60") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateFloat(arg, argv[++i], args.rt60, true)) std::exit(1);
+        }
+        else if (arg == "--mean_wait") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateFloat(arg, argv[++i], args.mean_wait, true)) std::exit(1);
+        }
+        
+        // --- Integers zero or greater (>= 0) ---
+        else if (arg == "--api_idx") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateInt(arg, argv[++i], args.api_idx, 0)) std::exit(1);
+        }
+        else if (arg == "--input_device_idx") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateInt(arg, argv[++i], args.input_device_idx, 0)) std::exit(1);
+        }
+        else if (arg == "--output_device_idx") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateInt(arg, argv[++i], args.output_device_idx, 0)) std::exit(1);
+        }
+        else if (arg == "--input_channels") {
+            if (i + 2 >= argc) { std::cerr << "Error: --input_channels requires 2 integer values.\n"; std::exit(1); }
+            if (!parseAndValidateInt(arg, argv[++i], args.in_channels[0], 0)) std::exit(1);
+            if (!parseAndValidateInt(arg, argv[++i], args.in_channels[1], 0)) std::exit(1);
+        }
+        else if (arg == "--output_channels") {
+            if (i + 2 >= argc) { std::cerr << "Error: --output_channels requires 2 integer values.\n"; std::exit(1); }
+            if (!parseAndValidateInt(arg, argv[++i], args.out_channels[0], 0)) std::exit(1);
+            if (!parseAndValidateInt(arg, argv[++i], args.out_channels[1], 0)) std::exit(1);
+        }
+
+        // --- Decibel level parameter (<= 0.0) ---
+        else if (arg == "--level") {
+            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
+            if (!parseAndValidateFloat(arg, argv[++i], args.level, false)) std::exit(1);
+            if (args.level > 0.0f) {
+                std::cerr << "Warning: Level must be 0 dB or less. Restoring default value of -10.0 dB.\n";
+                args.level = -10.0f;
             }
         }
-        else if (arg == "--api_idx" && i + 1 < argc) args.api_idx = std::stoi(argv[++i]);
-        else if (arg == "--input_device_idx" && i + 1 < argc) args.input_device_idx = std::stoi(argv[++i]);
-        else if (arg == "--output_device_idx" && i + 1 < argc) args.output_device_idx = std::stoi(argv[++i]);
-        else if (arg == "--input_channels" && i + 2 < argc) {
-            args.in_channels[0] = std::stoi(argv[++i]);
-            args.in_channels[1] = std::stoi(argv[++i]);
-        }
-        else if (arg == "--output_channels" && i + 2 < argc) {
-            args.out_channels[0] = std::stoi(argv[++i]);
-            args.out_channels[1] = std::stoi(argv[++i]);
+        
+        // --- Catch-All Error Case ---
+        else {
+            std::cerr << "Error: Unknown or unrecognized command line option: '" << arg << "'\n";
+            show_help_info(argv);
+            std::exit(1);
         }
     }
     return args;
 }
+
+
 
 
 // Write 32-bit Float Mono WAV File
@@ -328,8 +429,8 @@ bool check_host_api_and_device(AppArgs& args) {
 }
 
 
-// Stimulus Generation (with padding, filtering, gain, and clipping)
-std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float level_dB) {
+// Stimulus Generation including windowing, padding, and gain
+std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float room_decay_time, float level_dB) {
     // Promote core calculation variables to double precision
     double d_sample_rate = static_cast<double>(sample_rate);
     double d_start_freq  = static_cast<double>(start_freq);
@@ -351,7 +452,9 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     std::vector<float> stimulus(num_samples);
 
     // Convert decibels to a linear amplitude multiplier in double precision
-    double amplitude = std::pow(10.0, d_level_dB / 20.0);
+    // amplitude must be 1.0 or less.
+    double amplitude = std::min( 1.0, std::pow(10.0, d_level_dB / 20.0) );
+
 
     // Precompute constant terms in double precision outside the loop
     const double ln_ratio = std::log(end_freq / d_start_freq);
@@ -368,110 +471,89 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
         stimulus[i] = static_cast<float>(amplitude * std::sin(phase));
     }
  
-    // Apply Tapers (Half-Hann windows)
-    int start_length = static_cast<int>(sample_rate * (duration * (0.3f / total_decades)));
-    int end_length = static_cast<int>(sample_rate * (duration * (0.15f / total_decades)));
+    // Generate half-Hann windows:
+    // Calculate taper for low frequency (start) end of chirp:
+    //   Define taper width in decades of frequency; 0.3 ~ one octave
+    const float width_in_decades = 0.3f;  
+    int start_length = static_cast<int>(sample_rate * (duration * (width_in_decades / total_decades)));    
+    // Taper width for high frequency end of chirp is fixed at 220 samples. 
+    //   This corresponds to 5 ms at a 44.1 kHz sample rate. 
+    int end_length = 220;
 
+    // Apply Tapers:
     for (int i = 0; i < start_length; ++i) {
-        float hann = 0.5f * (1.0f - std::cos(M_PI * i / start_length));
+        double hann = 0.5 * (1.0 - std::cos(M_PI * static_cast<double>(i) / start_length));
         stimulus[i] *= hann;
     }
     for (int i = 0; i < end_length; ++i) {
-        float hann = 0.5f * (1.0f - std::cos(M_PI * i / end_length));
-        stimulus[num_samples - end_length + i] *= (1.0f - hann);
+        double hann = 0.5 * (1.0 - std::cos(M_PI * static_cast<double>(i) / end_length));
+        stimulus[num_samples - end_length + i] *= (1.0 - hann);
     }
 
-    // Add 0.5sec of zero padding at the end
-    int end_pad_samples = static_cast<int>(sample_rate * 0.5f);
+    // Add zero padding at the end equal to the room_decay_time + 0.5 sec
+    int end_pad_samples = static_cast<int>(sample_rate * (0.5 + room_decay_time) );
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
 
-// 4th-Order Highpass Bessel Filter
-    // The corner frequency is 4 times the start frequency
-    double corner_freq = 4.0 * static_cast<double>(start_freq);
-    double fs = static_cast<double>(sample_rate);
+    return stimulus;
+}
 
-    // Pre-warp the analog angular frequency for the cutoff
-    double absolute_w0 = 2.0 * fs * std::tan(M_PI * corner_freq / fs); 
 
-    Eigen::MatrixXd sos(2, 6);
 
-    // 4th-order Bessel normalized lowpass prototype parameters (Stage 0 and Stage 1).
-    // Using standard coefficients for the two biquad stages (Q and frequency scaling factors):
-    // Stage 1: Q1 = 0.805538, frequency multiplier = 1.603358
-    // Stage 2: Q2 = 0.521935, frequency multiplier = 1.430172
-    // (Values derived from standard analog filter tables / miniDSP / analog design references)
-    double q[2]       = { 0.80553828, 0.52193458 };
-    double freq_mult[2] = { 1.60335752, 1.43017156 };
+// Generate the inverse filter that will be required later by the Farina method
+std::vector<float> generate_inverse_filter(int sample_rate, float chirp_rate, float start_freq) {
+    // Promote core variables to double precision
+    double d_sample_rate = static_cast<double>(sample_rate);
+    double d_start_freq  = static_cast<double>(start_freq);
+    double d_chirp_rate  = static_cast<double>(chirp_rate);
 
-    for (int s = 0; s < 2; ++s) {
-        // Scale the pre-warped omega for each stage's specific pole pair
-        double stage_w0 = absolute_w0 * freq_mult[s];
-        double stage_w0_sq = stage_w0 * stage_w0;
-        double fs2 = 2.0 * fs;
-        double fs2_sq = fs2 * fs2;
+    double end_freq = 0.99 * 0.5 * d_sample_rate; //99% of Nyquist frequency
+
+    if (d_start_freq <= 0.0 || end_freq <= d_start_freq || d_chirp_rate <= 0.0 || sample_rate <= 0) {
+        throw std::invalid_argument("Invalid parameters for inverse filter generation.");
+    }
+
+    double total_decades = std::log10(end_freq / d_start_freq);
+    double duration = d_chirp_rate * total_decades;
+    int num_samples = static_cast<int>(d_sample_rate * duration);
+
+    std::vector<double> inv_filter(num_samples);
+    std::vector<double> ideal_sweep(num_samples);
+
+    const double ln_ratio = std::log(end_freq / d_start_freq);
+    const double phase_factor = d_start_freq * duration / ln_ratio;
+    const double ratio = end_freq / d_start_freq;
+    const double two_pi = 2.0 * M_PI;
+
+    double energy_sum = 0.0;
+
+    // Generate the non-windowed version of the stimulus
+    for (int i = 0; i < num_samples; ++i) {
+        double t = static_cast<double>(i) / d_sample_rate;
+        double phase = two_pi * phase_factor * (std::pow(ratio, t / duration) - 1.0);
+        ideal_sweep[i] = std::sin(phase);
+        energy_sum += ideal_sweep[i] * ideal_sweep[i];
+    }
+
+    // Construct Farina Inverse Filter: Time-reverse the sweep and 
+    //  apply -6 dB/octave amplitude compensation (exponential growth)
+    for (int i = 0; i < num_samples; ++i) {
+        double t = static_cast<double>(i) / d_sample_rate;
+        int rev_idx = num_samples - 1 - i;
         
-        // Parameter alpha for bilinear transform of a highpass biquad
-        // Denominator coefficients in analog domain: s^2 + (w0/Q)s + w0^2
-        double alpha_bessel = stage_w0 / q[s];
-
-        // Bilinear transform equations for Highpass Filter
-        double a0 = fs2_sq + alpha_bessel * fs2 + stage_w0_sq;
-        double a1 = 2.0 * stage_w0_sq - 2.0 * fs2_sq;
-        double a2 = fs2_sq - alpha_bessel * fs2 + stage_w0_sq;
-
-        // Highpass zeros at DC (z = 1)
-        double b0 = fs2_sq;
-        double b1 = -2.0 * fs2_sq;
-        double b2 = fs2_sq;
-
-        sos(s, 0) = b0 / a0; sos(s, 1) = b1 / a0; sos(s, 2) = b2 / a0;
-        sos(s, 3) = 1.0;     sos(s, 4) = a1 / a0; sos(s, 5) = a2 / a0;
-    }
-
-    // Apply the filter using double precision
-    std::vector<double> filtered(stimulus.begin(), stimulus.end());
-
-    // Process all SOS stages entirely in double precision
-    for (int s = 0; s < 2; ++s) {
-        double b0 = sos(s, 0), b1 = sos(s, 1), b2 = sos(s, 2);
-        double a1 = sos(s, 4), a2 = sos(s, 5); 
+        // Amplitude modulation for energy flattening across octaves
+        double modulation = std::exp(t * ln_ratio / duration);
         
-        double x1 = 0.0, x2 = 0.0; 
-        double y1 = 0.0, y2 = 0.0;
-
-        for (size_t i = 0; i < filtered.size(); ++i) {
-            double x0 = filtered[i]; 
-            double y0 = (b0 * x0) + (b1 * x1) + (b2 * x2) - (a1 * y1) - (a2 * y2);
-            
-            x2 = x1; x1 = x0;
-            y2 = y1; y1 = y0;
-            
-            filtered[i] = y0; 
-        }
+        inv_filter[i] = ideal_sweep[rev_idx] * modulation;
     }
 
-    // Convert back to float
-    std::vector<float> final_output(filtered.size());
-    for (size_t i = 0; i < filtered.size(); ++i) {
-        final_output[i] = static_cast<float>(filtered[i]);
+    // Normalize by total energy
+    std::vector<float> final_inv_filter(num_samples);
+    for (int i = 0; i < num_samples; ++i) {
+        inv_filter[i] /= energy_sum;
+        final_inv_filter[i] = static_cast<float>(inv_filter[i]);
     }
 
-    // clip samples that exceed +/- 1.0 (0 dBFS)
-    int clipped_count = 0;
-    for (float& sample : final_output) {
-        if (sample > 1.0f) {
-            sample = 1.0f;
-            clipped_count++;
-        } else if (sample < -1.0f) {
-            sample = -1.0f;
-            clipped_count++;
-        }
-    }
-    if (clipped_count > 0) {
-        std::cout << "Warning: " << clipped_count << " samples exceeded +/- 1.0 and were clipped.\n";
-    }
-
-    return final_output;
+    return final_inv_filter;
 }
 
 
@@ -1079,7 +1161,8 @@ int main(int argc, char* argv[]) {
     std::vector<float> stimulus = generate_stimulus(
         args.sample_rate, 
         args.chirp_rate, 
-        args.start_freq, 
+        args.start_freq,
+        args.rt60, 
         args.level
     );
 
@@ -1095,13 +1178,23 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    //Write data as WAV file(s)
     std::cout << "\n--- Saving Data Files ---\n";
+    //Write microphone data as WAV file
     write_float32_wav(args.mic_output_file, final_avg_mic, args.sample_rate);
+
+    //If the stimulus filename was supplied, write stimulus data as WAV file
     if (!args.stimulus_output_file.empty()) {
         write_float32_wav(args.stimulus_output_file, final_avg_ref, args.sample_rate);
     } else {
         std::cout << " Stimulus output file pathname omitted by user - stimulus data not saved.\n";
+    }
+
+    // If the Farina filter filename was supplied, Generate and save the Farina Inverse Filter as WAV file
+    if (!args.farina_filter_file.empty()) {
+        std::vector<float> inv_filter = generate_inverse_filter(sample_rate, chirp_rate, start_freq);
+        write_float32_wav(args.farina_filter_file, inv_filter, sample_rate);
+    } else {
+        std::cout << " Farina filter file pathname omitted by user - filter not saved.\n";
     }
 
     std::cout << "\n------------ All tasks completed ------------ \n\n";

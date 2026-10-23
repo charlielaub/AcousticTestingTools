@@ -1,7 +1,7 @@
 """
 WAVplot - Plotting utility for up to four WAV files
 Description: This program plots up to four WAV files, provided in a list on the  
-    comand line. Each plot can be saved as a PNG or PDF file at 600dpi.
+     command line. Each plot can be saved as a PNG or PDF file at 600dpi.
 
 Author: Charlie Laub
 Date: October 2026
@@ -40,7 +40,7 @@ def main():
 
     n_files = len(args.wav_files)
     
-    # Create dynamic subplots with shared X and Y axes so zooming/panning is synchronized
+    # Create dynamic subplots with shared X and Y axes (change sharey=False if amplitudes vary wildly)
     fig, axes = plt.subplots(n_files, 1, figsize=(10, 2.5 * n_files), sharex=True, sharey=True)
     if n_files == 1:
         axes = [axes]  # Ensure axes is iterable when there's only 1 subplot
@@ -70,28 +70,30 @@ def main():
     spacing = 0.03
     start_left = 0.1
     
-    # 1. Create EXIT Button on the far left
+    # List to hold persistent button references and prevent garbage collection
+    active_buttons = []
+    
+    # Create EXIT Button on the far left
     ax_exit = fig.add_axes([start_left, 0.08, button_width, button_height])
-    btn_exit = Button(ax_exit, 'EXIT', color='lightcoral', hovercolor='salmon')
+    btn_exit = Button(ax_exit, 'EXIT', color='aliceblue', hovercolor='palegreen')
     
     def close_window(event):
         plt.close(fig)
     btn_exit.on_clicked(close_window)
+    active_buttons.append(btn_exit)
     
-    # 2. Create SAVE Buttons dynamically for each active plot with file dialog prompt
+    # Create SAVE Buttons dynamically for each active plot with file dialog prompt
     for i in range(n_files):
         left_pos = start_left + (i + 1) * (button_width + spacing)
         ax_save = fig.add_axes([left_pos, 0.08, button_width, button_height])
-        btn_save = Button(ax_save, f'SAVE #{i+1}', color='lightgray', hovercolor='darkgray')
+        btn_save = Button(ax_save, f'SAVE #{i+1}', color='aliceblue', hovercolor='palegreen')
         
         def make_save_action(index, filepath):
             def save_action(event):
-                # Initialize hidden tkinter root for file dialog
                 root = tk.Tk()
                 root.withdraw()
                 root.attributes('-topmost', True) # Bring dialog to front
                 
-                # Prompt user for filename and format (png or pdf)
                 file_path = filedialog.asksaveasfilename(
                     title=f"Save Plot #{index + 1} As",
                     defaultextension=".png",
@@ -121,6 +123,9 @@ def main():
             return save_action
             
         btn_save.on_clicked(make_save_action(i, args.wav_files[i]))
+        
+        # Append each save button to the persistent list
+        active_buttons.append(btn_save)
 
     plt.show()
 
