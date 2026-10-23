@@ -499,62 +499,78 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
 
 
-// Generate the inverse filter that will be required later by the Farina method
-std::vector<float> generate_inverse_filter(int sample_rate, float chirp_rate, float start_freq) {
+/**
+ * Generates the analytical Farina inverse filter with an integrated 2.5% 
+ * high-frequency fade-out taper to suppress Nyquist mathematical edge ringing.
+ *
+ * @param sample_rate  The system sampling rate in Hz (e.g., 44100, 48000).
+ * @param chirp_rate   The sweep rate parameter (seconds per decade).
+ * @param start_freq   The starting frequency of the exponential sweep in Hz.
+ * @param fade_ratio   The array percentage dedicated to the taper (default 0.025 = 2.5%).
+ */
+std::vector<float> generate_inverse_filter(int sample_rate, float chirp_rate, float start_freq, float fade_ratio = 0.025f) {
     // Promote core variables to double precision
     double d_sample_rate = static_cast<double>(sample_rate);
     double d_start_freq  = static_cast<double>(start_freq);
     double d_chirp_rate  = static_cast<double>(chirp_rate);
 
-    double end_freq = 0.99 * 0.5 * d_sample_rate; //99% of Nyquist frequency
+    // 99% of Nyquist frequency
+    double end_freq = 0.99 * 0.5 * d_sample_rate; 
 
     if (d_start_freq <= 0.0 || end_freq <= d_start_freq || d_chirp_rate <= 0.0 || sample_rate <= 0) {
         throw std::invalid_argument("Invalid parameters for inverse filter generation.");
+    }
+    if (fade_ratio < 0.0f || fade_ratio > 0.20f) {
+        throw std::invalid_argument("Fade ratio should typically be between 0.0 (0%) and 0.20 (20%).");
     }
 
     double total_decades = std::log10(end_freq / d_start_freq);
     double duration = d_chirp_rate * total_decades;
     int num_samples = static_cast<int>(d_sample_rate * duration);
 
-    std::vector<double> inv_filter(num_samples);
     std::vector<double> ideal_sweep(num_samples);
+    std::vector<float> final_inv_filter(num_samples);
 
     const double ln_ratio = std::log(end_freq / d_start_freq);
     const double phase_factor = d_start_freq * duration / ln_ratio;
     const double ratio = end_freq / d_start_freq;
     const double two_pi = 2.0 * M_PI;
 
-    double energy_sum = 0.0;
-
-    // Generate the non-windowed version of the stimulus
+    // 1. Generate the ideal forward exponential sweep stimulus
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / d_sample_rate;
         double phase = two_pi * phase_factor * (std::pow(ratio, t / duration) - 1.0);
         ideal_sweep[i] = std::sin(phase);
-        energy_sum += ideal_sweep[i] * ideal_sweep[i];
     }
 
-    // Construct Farina Inverse Filter: Time-reverse the sweep and 
-    //  apply -6 dB/octave amplitude compensation (exponential growth)
+    // 2. Compute the precise Farina normalization scaling constant.
+    double sweep_rate_L = duration / ln_ratio;
+    double normalization_scaler = 2.0 / (d_sample_rate * sweep_rate_L);
+
+    // 3. Construct Farina Inverse Filter (Time-reversed + Exponential growth)
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / d_sample_rate;
         int rev_idx = num_samples - 1 - i;
         
-        // Amplitude modulation for energy flattening across octaves
-        double modulation = std::exp(-t * ln_ratio / duration);
-        
-        inv_filter[i] = ideal_sweep[rev_idx] * modulation;
+        double modulation = std::exp(t / sweep_rate_L) * normalization_scaler;
+        final_inv_filter[i] = static_cast<float>(ideal_sweep[rev_idx] * modulation);
     }
 
-    // Normalize by total energy
-    std::vector<float> final_inv_filter(num_samples);
-    for (int i = 0; i < num_samples; ++i) {
-        inv_filter[i] /= energy_sum;
-        final_inv_filter[i] = static_cast<float>(inv_filter[i]);
+    // 4. Apply High-Frequency Fade-Out Window (2.5% Taper)
+    // Because the inverse filter is time-reversed, the maximum frequency (end_freq) 
+    // happens at index i = 0. Fading out high frequencies means fading IN at index 0.
+    int fade_samples = static_cast<int>(num_samples * fade_ratio);
+    for (int i = 0; i < fade_samples; ++i) {
+        // Taper using a raised cosine (half-Hann window) from 0.0 to 1.0
+        double angle = (static_cast<double>(i) / fade_samples) * (M_PI / 2.0);
+        double taper = std::sin(angle); // smooth curve from sin(0)=0 to sin(pi/2)=1
+        
+        final_inv_filter[i] *= static_cast<float>(taper);
     }
 
     return final_inv_filter;
 }
+
 
 
 // Fractional delay filter with integer shift separation and zero-padding

@@ -29,11 +29,6 @@ def parse_arguments():
     optional microphone calibration, sensitivity parameters, and amplifier gain.
     """
     parser = argparse.ArgumentParser(description="Process loudspeaker impulse response WAV file and export data/plots (Interactive GUI).")
-    parser.add_argument("-i","--impulse_data", 
-            type=str,
-            required=True, 
-            help="Path to the H1 estimated impulse data WAV file."
-    )
     parser.add_argument("-m","--mic_data", 
             type=str,
             required=True,
@@ -183,19 +178,10 @@ def compute_frequency_response(
 
 
 
-def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq, gate_end_idx, max_harmonic=5):
+def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq, gate_start_idx, gate_end_idx, max_harmonic=5):
     """
-    Checks if the given gate_end_idx causes overlapping windows between 
+    Checks if the given window length causes overlapping windows between 
     adjacent harmonics in a Farina method impulse response.
-    
-    Returns:
-    --------
-    peak_indices : dict
-        Peak sample index for each harmonic.
-    warnings_list : list of str
-        Formatted warning messages if overlaps occur.
-    overlaps : numpy.ndarray
-        Array of overlap sample counts indexed by harmonic order k (size max_harmonic + 1).
     """
     duration = len(inv_filter) / sample_rate
     nyquist = 0.5 * sample_rate
@@ -215,18 +201,24 @@ def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq,
         
         peak_indices[k] = linear_peak_idx - sample_offset
         
-    # 2. Initialize overlap tracking array (1-indexed for convenience: index k corresponds to harmonic k)
+    # 2. Initialize overlap tracking array
     overlaps = np.zeros(max_harmonic + 1, dtype=int)
     warnings_list = []
+    
+    # Calculate the actual active window length from user gates
+    window_len = gate_end_idx - gate_start_idx
     
     # 3. Check for overlaps between adjacent harmonics
     for k in range(2, max_harmonic + 1):
         current_peak = peak_indices[k]
-        window_end = current_peak + gate_end_idx
+        
+        # Correct window end relative to each harmonic's unique peak
+        # (Assuming the window spans from gate_start_idx relative offset to window_len)
+        window_end_sample = current_peak + window_len
         prev_peak = peak_indices[k - 1] # The lower-order harmonic to its right
         
-        if window_end > prev_peak:
-            overlap_samples = window_end - prev_peak
+        if window_end_sample > prev_peak:
+            overlap_samples = window_end_sample - prev_peak
             overlaps[k] = overlap_samples
             warnings_list.append(
                 f"Overlap Warning: Harmonic {k} window extends past the peak of "
@@ -238,11 +230,42 @@ def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq,
     # 4. Append a single recommendation at the end if warnings were found
     if warnings_list:
         warnings_list.append(
-            "Recommendation: Consider reducing gate_end_idx or increasing the sweep duration."
+            "Recommendation: Consider reducing the window length or increasing the sweep duration."
         )
-            
+        
     return peak_indices, warnings_list, overlaps
 
+
+
+
+def nth_harmonic_time(n, duration, f1, f2):
+    """Computes the relative time offset of the n-th harmonic (or fractional order)
+    using Teemu Ikonen's Farina sweep formulation.
+    """
+    return -duration * np.log(n) / np.log(f2 / f1)
+
+
+
+def extract_harmonic_segment(full_ir, sample_rate, duration, start_freq, end_freq, linear_peak_idx, n):
+    """
+    Extracts the Nth harmonic segment using Teemu Ikonen's midpoint-boundary method 
+    and returns both the segment and its starting index.
+    """
+    order_t1 = n + 0.5
+    order_t2 = (n - 1) + 0.5 if n > 1 else 1.5
+    
+    t1 = -duration * np.log(order_t1) / np.log(end_freq / start_freq)
+    t2 = -duration * np.log(order_t2) / np.log(end_freq / start_freq)
+    
+    start_idx = linear_peak_idx + int(round(t1 * sample_rate))
+    end_idx = linear_peak_idx + int(round(t2 * sample_rate))
+    
+    start_idx, end_idx = min(start_idx, end_idx), max(start_idx, end_idx)
+    start_idx = max(0, min(start_idx, len(full_ir)))
+    end_idx = max(0, min(end_idx, len(full_ir)))
+    
+    segment = full_ir[start_idx:end_idx]
+    return segment, start_idx
 
 
 
@@ -299,94 +322,152 @@ def run_farina_analysis(
               standard phase, minimum phase, and frequency resolution) for each harmonic 
               index `k`, as well as the total harmonic distortion percentage ("thd_percent").
     """ 
-    # 1. Compute sweep parameters from the inverse filter length
     duration = len(inv_filter) / sample_rate
     nyquist = 0.5 * sample_rate
     end_freq = 0.99 * nyquist
-    ln_ratio = np.log(end_freq / start_freq)
 
-    # 2. Perform Fast Convolution (Deconvolution)
+    # 1. Perform Fast Deconvolution
     full_ir = scipy.signal.fftconvolve(recorded_audio, inv_filter, mode='full')
     linear_peak_idx = np.argmax(np.abs(full_ir))
 
-    # Calculate peak indices for all harmonics
-    peak_indices = {}
+    harmonic_results = {}
+    user_gate_len = gate_end_idx - gate_start_idx
+
+    # 2. Extract and process each harmonic
     for k in range(1, max_harmonic + 1):
         if k == 1:
-            sample_offset = 0
+            start_idx = gate_start_idx
+            end_idx = gate_end_idx
+            segment = full_ir[start_idx:end_idx].copy()
         else:
-            delta_t = (duration / ln_ratio) * np.log(k)
-            sample_offset = int(round(delta_t * sample_rate))
-        peak_indices[k] = linear_peak_idx - sample_offset
+            # Slicing anchored to a fixed-length window around the precise harmonic peak index
+            delta_t = -duration * np.log(k) / np.log(end_freq / start_freq)
+            harmonic_peak_idx = linear_peak_idx + int(round(delta_t * sample_rate))
+            
+            # Start slightly before the peak (10% of window length) to capture pre-echo
+            start_idx = harmonic_peak_idx - int(0.1 * user_gate_len)
+            end_idx = start_idx + user_gate_len
+            
+            # Boundary checks
+            start_idx = max(0, min(start_idx, len(full_ir)))
+            end_idx = max(0, min(end_idx, len(full_ir)))
+            segment = full_ir[start_idx:end_idx].copy()
+            
+            # Pad with zeros if the array bounds cut the segment short
+            if len(segment) < user_gate_len:
+                segment = np.pad(segment, (0, user_gate_len - len(segment)), 'constant')
 
-    # Determine window length and the pre-roll distance from the H1 peak
-    h1_window_len = gate_end_idx - gate_start_idx
-    h1_pre_roll = peak_indices[1] - gate_start_idx
+        # Apply Tukey window locally to the isolated segment
+        if len(segment) > 0:
+            win = scipy.signal.get_window(('tukey', tukey_alpha), len(segment))
+            windowed_segment = segment * win
+        else:
+            windowed_segment = segment
 
-    harmonic_results = {}
-    
-    # 3. Extract and process each harmonic
-    for k in range(1, max_harmonic + 1):
-        peak_idx = peak_indices[k]
+        # --- Direct FFT & Phase Alignment Processing ---
+        desired_len = max(2048, 2 * len(windowed_segment))
+        n_fft = 1 << math.ceil(math.log2(desired_len))
         
-        # Correctly position the window relative to each harmonic's unique peak
-        start_idx = max(0, peak_idx - h1_pre_roll)
-        end_idx = min(len(full_ir), start_idx + h1_window_len)
+        fft_result = np.fft.rfft(windowed_segment, n=n_fft)
+        freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
+        
+        # Calculate time delay of this slice's start index relative to the t=0 linear peak
+        time_delay = (start_idx - linear_peak_idx) / sample_rate
+        
+        # Apply Phase Rotation Factor (Fourier Shift Theorem) to eliminate the linear phase ramp
+        phase_rotation = np.exp(1j * 2.0 * np.pi * freqs * time_delay)
+        aligned_fft_result = fft_result * phase_rotation
+        
+        # Extract unwrapped true phase alignment angle in degrees
+        phase_deg = np.angle(aligned_fft_result, deg=True)
+        # Optional: Unwrapping phase prevents hard 180/-180 vertical jumping visual artifacts
+        phase_deg_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(phase_deg)))
 
-        segment = full_ir[start_idx:end_idx]
+        # Extract magnitude from the raw FFT data
+        mag = np.abs(fft_result)
+        mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))
 
-        # Zero-pad to preserve absolute time delay for the phase response
-        padded_segment = np.zeros_like(full_ir)
-        padded_segment[start_idx:start_idx + len(segment)] = segment
+        # --- Apply Calibration Settings ---
+        if k == 1:
+            if mic_sensitivity is not None and mic_sensitivity > 0:
+                sensitivity_v_pa = mic_sensitivity / 1000.0
+                p_ref = 20e-6
+                spl_offset = -20.0 * np.log10(sensitivity_v_pa * p_ref)
+                mag_db += spl_offset
 
-        # Apply calibration only to the fundamental (k=1)
-        current_mic_cal = mic_cal_file if k == 1 else None
-        current_mic_sens = mic_sensitivity if k == 1 else None
-        current_dist = distance if k == 1 else None
+            if mic_cal_file is not None:
+                # Assuming read_mic_cal_file exists globally in your code environment
+                cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
+                mag_db -= cal_corrections
 
-        freqs, mag_db, phase, min_phase, delta_f = compute_frequency_response(
-            audio_data=padded_segment,
-            sample_rate=sample_rate,
-            gate_end_idx=len(full_ir),
-            tukey_alpha=tukey_alpha,
-            mic_cal_file=current_mic_cal,
-            mic_sensitivity=current_mic_sens,
-            v_stimulus=v_stimulus,
-            distance=current_dist
-        )
+            mag_db -= 20.0 * np.log10(v_stimulus)
+            if distance is not None:
+                mag_db += 20.0 * np.log10(distance)
 
-        # Apply correct Farina scaling: f/k frequency axis mapping
+        # --- Farina Core Transform Space Adjustments ---
         corrected_freqs = freqs / k
         corrected_mag_db = mag_db.copy()
-
-        # Corrected amplitude adjustment for harmonics (subtraction fixes the "too low" levels)
+        
+        # CORRECTED: Level density correction requires adding energy per harmonic step
         if k > 1:
-            corrected_mag_db -= 20.0 * np.log10(k)
+            corrected_mag_db += 20.0 * np.log10(k)
 
+        # Minimum Phase processing on the clean isolated segment array
+        try:
+            min_phase_signal = scipy.signal.minimum_phase(windowed_segment, method='homomorphic', half=False)
+            min_fft_result = np.fft.rfft(min_phase_signal, n=n_fft)
+            min_phase_deg = np.angle(min_fft_result, deg=True)
+            min_phase_deg = np.rad2deg(np.unwrap(np.deg2rad(min_phase_deg)))
+        except:
+            min_phase_deg = phase_deg_unwrapped.copy()
+
+        # Calculate time delta for resolution tracking
+        delta_f = float(sample_rate / n_fft)
+
+        valid_idx = freqs <= (sample_rate / 2.0)
         harmonic_results[k] = {
-            "freqs": corrected_freqs,
-            "mag_db": corrected_mag_db,
-            "phase_deg": phase,
-            "min_phase_deg": min_phase,
-            "delta_f": delta_f / k
+            'freqs': corrected_freqs[valid_idx],
+            'mag_db': corrected_mag_db[valid_idx],
+            'phase': phase_deg_unwrapped[valid_idx],
+            'min_phase': min_phase_deg[valid_idx],
+            'delta_frequency': delta_f
         }
 
-    # 4. Compute Total Harmonic Distortion (THD %)
-    if 1 in harmonic_results:
-        fund_mag = harmonic_results[1]["mag_db"]
-        distortion_sum_sq = 0.0
-
+    # --- Safe THD percentage calculation block ---
+    if 1 in harmonic_results and len(harmonic_results) > 1:
+        f_ref = harmonic_results[1]['freqs']
+        h1_mag = harmonic_results[1]['mag_db']
+        sum_sq_harmonics_linear = np.zeros_like(f_ref)
+        
+        # Create a mask tracking where data is physically valid
+        # THD as a whole is limited by the lowest higher-order harmonic boundary (H2)
+        valid_thd_mask = f_ref >= (2.0 * start_freq)
+        
         for k in range(2, max_harmonic + 1):
             if k in harmonic_results:
-                harm_mag = harmonic_results[k]["mag_db"]
-                rel_mag_linear = 10.0 ** ((harm_mag - fund_mag) / 20.0)
-                distortion_sum_sq += rel_mag_linear ** 2
+                # Interpolate onto the fundamental grid
+                mag_k_interp = np.interp(f_ref, harmonic_results[k]['freqs'], harmonic_results[k]['mag_db'])
+                
+                # Linearize the distortion ratio
+                linear_ratio = 10.0 ** ((mag_k_interp - h1_mag) / 20.0)
+                
+                # Mask out invalid low frequency regions for this specific harmonic to prevent noise leakage
+                harmonic_cutoff = k * start_freq
+                linear_ratio[f_ref < harmonic_cutoff] = 0.0
+                
+                sum_sq_harmonics_linear += linear_ratio ** 2
+                
+        thd_linear = np.sqrt(sum_sq_harmonics_linear)
+        thd_percent = thd_linear * 100.0
+        
+        # Set invalid low frequency regions to NaN so they don't draw artifacts on your UI plots
+        thd_percent[~valid_thd_mask] = np.nan
+        harmonic_results['thd_percent'] = thd_percent
 
-        harmonic_results["thd_percent"] = 100.0 * np.sqrt(distortion_sum_sq)
-    else:
-        harmonic_results["thd_percent"] = None
-
+        
     return harmonic_results
+
+
 
 
 
@@ -797,7 +878,7 @@ def main():
                 recorded_audio=mic_data,
                 sample_rate=sample_rate,
                 inv_filter=inv_filter,
-                start_freq=20.0,
+                start_freq=10.0,
                 gate_start_idx=state['gate_start_idx'],
                 gate_end_idx=state['gate_idx'],
                 tukey_alpha=state['tukey_alpha'],
@@ -866,7 +947,7 @@ def main():
                     recorded_audio=mic_data,
                     sample_rate=sample_rate,
                     inv_filter=inv_filter,
-                    start_freq=20.0,
+                    start_freq=10.0,
                     gate_start_idx=state['gate_start_idx'],
                     gate_end_idx=state['gate_idx'],
                     tukey_alpha=state['tukey_alpha'],
