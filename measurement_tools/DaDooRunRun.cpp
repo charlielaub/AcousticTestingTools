@@ -191,7 +191,7 @@ AppArgs parse_arguments(int argc, char* argv[]) {
         std::string arg = argv[i];
         
         if (arg == "--help" || arg == "-h") {
-            show_help_info(argv);
+            show_help_info(argv[0]);
             std::exit(0);
         }
         // --- String outputs ---
@@ -1191,8 +1191,8 @@ int main(int argc, char* argv[]) {
 
     // If the Farina filter filename was supplied, Generate and save the Farina Inverse Filter as WAV file
     if (!args.farina_filter_file.empty()) {
-        std::vector<float> inv_filter = generate_inverse_filter(sample_rate, chirp_rate, start_freq);
-        write_float32_wav(args.farina_filter_file, inv_filter, sample_rate);
+        std::vector<float> inv_filter = generate_inverse_filter(args.sample_rate, args.chirp_rate, args.start_freq);
+        write_float32_wav(args.farina_filter_file, inv_filter, args.sample_rate);
     } else {
         std::cout << " Farina filter file pathname omitted by user - filter not saved.\n";
     }
