@@ -547,14 +547,16 @@ std::vector<float> generate_inverse_filter(int sample_rate, float chirp_rate, fl
     double sweep_rate_L = duration / ln_ratio;
     double normalization_scaler = 2.0 / (d_sample_rate * sweep_rate_L);
 
-    // 3. Construct Farina Inverse Filter (Time-reversed + Exponential growth)
+    // 3. Construct Farina Inverse Filter (Time-reversed + Correct Exponential growth)
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / d_sample_rate;
         int rev_idx = num_samples - 1 - i;
         
-        double modulation = std::exp(t / sweep_rate_L) * normalization_scaler;
+        // FIXED: Using (duration - t) ensures maximum gain is applied at index 0 (high frequencies)
+        double modulation = std::exp((duration - t) / sweep_rate_L) * normalization_scaler;
         final_inv_filter[i] = static_cast<float>(ideal_sweep[rev_idx] * modulation);
     }
+
 
     // 4. Apply High-Frequency Fade-Out Window (2.5% Taper)
     // Because the inverse filter is time-reversed, the maximum frequency (end_freq) 

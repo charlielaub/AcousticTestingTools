@@ -79,47 +79,48 @@ def compute_frequency_response(
     v_stimulus,
     distance,
 ):
-    """Applies a Tukey window, computes standard FFT and minimum phase FFT,
-
-    applies correction factors and returns frequencies, magnitude (dB),
-    standard phase (deg), minimum phase (deg), and delta_frequency (Hz).
+    """
+    Applies a Tukey window, computes a standardized normalized FFT,
+    applies acoustic hardware correction factors, and returns frequencies, 
+    calibrated magnitude (dBSPL), phase vectors, and delta frequency.
     """
     gate_end_idx = max(10, min(gate_end_idx, len(audio_data)))
 
-    # Get Tukey window using scipy.signal.get_window
+    # Apply Tukey window locally to the active segment
     win = scipy.signal.get_window(('tukey', tukey_alpha), gate_end_idx)
-
-    # Restrict windowed_data strictly to the gated segment length
     windowed_data = audio_data[:gate_end_idx].astype(np.float32) * win
 
-    # Zero-pad for smoother frequency resolution in the FFT
+    # Determine optimal power-of-2 FFT length
     desired_len = max(2048, 2 * len(windowed_data))
     n_fft = 1 << math.ceil(math.log2(desired_len))
 
-    # Standard FFT response
+    # Standard real FFT execution
     fft_result = np.fft.rfft(windowed_data, n=n_fft)
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
 
+    # FIXED: Standardize FFT amplitude scaling to prevent zero-pad energy dilution
     mag = np.abs(fft_result)
-    mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))  # Prevent log(0)
+    mag_normalized = mag / (n_fft / 2.0)
+    mag_db = 20.0 * np.log10(np.maximum(mag_normalized, 1e-12))
+    
     phase_deg = np.angle(fft_result, deg=True)
 
-    # Apply Microphone Sensitivity Scaling
+    # --- Apply Real-World Acoustic Calibration Matrices ---
     if mic_sensitivity is not None and mic_sensitivity > 0:
         sensitivity_v_pa = mic_sensitivity / 1000.0  # mV/Pa to V/Pa
         p_ref = 20e-6  # 20 uPa reference pressure
         spl_offset = -20.0 * np.log10(sensitivity_v_pa * p_ref)
         mag_db += spl_offset
 
-    # Apply Microphone Calibration File Compensation
     if mic_cal_file is not None:
+        # Assumes your read_mic_cal_file helper function is accessible globally
         cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
         mag_db -= cal_corrections
 
     # Scale for stimulus RMS voltage
     mag_db -= 20.0 * np.log10(v_stimulus)
 
-    # Scale for measurement distance
+    # Scale for free-field acoustic measurement distance
     if distance is not None:
         mag_db += 20.0 * np.log10(distance)
 
@@ -133,47 +134,18 @@ def compute_frequency_response(
     except Exception:
         min_phase_deg = phase_deg.copy()
 
-    # --- Frequency Resolution Calculation via NCC & IFFT ---
-    try:
-        # 1. Generate minimum phase time response using amplitude and minimum phase
-        min_phase_rad = np.deg2rad(min_phase_deg)
-        min_complex_spectrum = mag * np.exp(1j * min_phase_rad)
-        impulse_minphase = np.fft.irfft(min_complex_spectrum, n=n_fft)
-
-        # Truncate impulse_minphase back to the window length for accurate cross-correlation
-        impulse_minphase_trimmed = impulse_minphase[: len(windowed_data)]
-
-        # 2. Compute Normalized Cross-Correlation (NCC) between the gated data and min-phase impulse
-        f = windowed_data - np.mean(windowed_data)
-        g = impulse_minphase_trimmed - np.mean(impulse_minphase_trimmed)
-        xcorr = scipy.signal.correlate(f, g, mode='full')
-        norm = np.sqrt(np.sum(f**2) * np.sum(g**2))
-        if norm > 0:
-            xcorr /= norm
-
-        # 3. Find peak position, convert to time, and calculate delta frequency
-        ncc_max_pos = np.argmax(xcorr)
-        # In 'full' mode, the zero-lag/start alignment offset is len(g) - 1
-        peak_index_offset = abs(ncc_max_pos - (len(g) - 1))
-        
-        ncc_max_time = float(peak_index_offset) / sample_rate
-        gate_end_time = float(gate_end_idx) / sample_rate
-
-        time_diff = gate_end_time - ncc_max_time
-        delta_frequency = (
-            float(1.0 / time_diff) if time_diff > 0 else float(sample_rate / n_fft)
-        )
-    except Exception:
-        delta_frequency = float(sample_rate / n_fft)
-
+    delta_frequency = float(sample_rate / n_fft)
     valid_idx = freqs <= (sample_rate / 2.0)
+    
     return (
         freqs[valid_idx],
         mag_db[valid_idx],
         phase_deg[valid_idx],
         min_phase_deg[valid_idx],
         delta_frequency,
+        fft_result[valid_idx] # Also pass raw complex spectrum out for post-rotation phase fixes
     )
+
 
 
 
@@ -331,127 +303,98 @@ def run_farina_analysis(
     linear_peak_idx = np.argmax(np.abs(full_ir))
 
     harmonic_results = {}
-    user_gate_len = gate_end_idx - gate_start_idx
+    user_gate_len = gate_end_offset - gate_start_offset
 
     # 2. Extract and process each harmonic
     for k in range(1, max_harmonic + 1):
         if k == 1:
-            start_idx = gate_start_idx
-            end_idx = gate_end_idx
-            segment = full_ir[start_idx:end_idx].copy()
+            # FIXED (Point 1): Fundamental H1 gates are anchored dynamically relative to the peak
+            start_idx = linear_peak_idx + gate_start_offset
+            end_idx = linear_peak_idx + gate_end_offset
         else:
-            # Slicing anchored to a fixed-length window around the precise harmonic peak index
+            # FIXED (Point 3 / Alternative): Use symmetrical fixed-length windows around the computed peak
+            # to replace the dynamic compression errors of the midpoint method
             delta_t = -duration * np.log(k) / np.log(end_freq / start_freq)
             harmonic_peak_idx = linear_peak_idx + int(round(delta_t * sample_rate))
             
-            # Start slightly before the peak (10% of window length) to capture pre-echo
+            # Center the user-defined gate size around the harmonic's peak
             start_idx = harmonic_peak_idx - int(0.1 * user_gate_len)
             end_idx = start_idx + user_gate_len
             
-            # Boundary checks
-            start_idx = max(0, min(start_idx, len(full_ir)))
-            end_idx = max(0, min(end_idx, len(full_ir)))
-            segment = full_ir[start_idx:end_idx].copy()
-            
-            # Pad with zeros if the array bounds cut the segment short
-            if len(segment) < user_gate_len:
-                segment = np.pad(segment, (0, user_gate_len - len(segment)), 'constant')
-
-        # Apply Tukey window locally to the isolated segment
-        if len(segment) > 0:
-            win = scipy.signal.get_window(('tukey', tukey_alpha), len(segment))
-            windowed_segment = segment * win
-        else:
-            windowed_segment = segment
-
-        # --- Direct FFT & Phase Alignment Processing ---
-        desired_len = max(2048, 2 * len(windowed_segment))
-        n_fft = 1 << math.ceil(math.log2(desired_len))
+        # Boundary constraints
+        start_idx = max(0, min(start_idx, len(full_ir)))
+        end_idx = max(0, min(end_idx, len(full_ir)))
+        segment = full_ir[start_idx:end_idx].copy()
         
-        fft_result = np.fft.rfft(windowed_segment, n=n_fft)
-        freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
-        
-        # Calculate time delay of this slice's start index relative to the t=0 linear peak
+        # Ensure segment arrays maintain identical padding lengths
+        if len(segment) < user_gate_len:
+            segment = np.pad(segment, (0, user_gate_len - len(segment)), 'constant')
+
+        # Pass calibration settings strictly to the linear fundamental (k=1)
+        current_mic_cal = mic_cal_file if k == 1 else None
+        current_mic_sens = mic_sensitivity if k == 1 else None
+        current_dist = distance if k == 1 else None
+
+        # FIXED (Point 2): Compute standard response on the isolated segment array
+        freqs, mag_db, phase_deg, min_phase_deg, delta_f, raw_fft = compute_frequency_response(
+            audio_data=segment,
+            sample_rate=sample_rate,
+            gate_end_idx=len(segment),
+            tukey_alpha=tukey_alpha,
+            mic_cal_file=current_mic_cal,
+            mic_sensitivity=current_mic_sens,
+            v_stimulus=v_stimulus,
+            distance=current_dist
+        )
+
+        # FIXED (Point 3): Phase Rotation Engine (Fourier Shift Theorem)
+        # Calculates time delta of this slice relative to the real physical t=0 peak index
         time_delay = (start_idx - linear_peak_idx) / sample_rate
-        
-        # Apply Phase Rotation Factor (Fourier Shift Theorem) to eliminate the linear phase ramp
         phase_rotation = np.exp(1j * 2.0 * np.pi * freqs * time_delay)
-        aligned_fft_result = fft_result * phase_rotation
         
-        # Extract unwrapped true phase alignment angle in degrees
-        phase_deg = np.angle(aligned_fft_result, deg=True)
-        # Optional: Unwrapping phase prevents hard 180/-180 vertical jumping visual artifacts
-        phase_deg_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(phase_deg)))
+        # Apply the rotation to align coordinate grids
+        aligned_fft = raw_fft * phase_rotation
+        
+        # Extract the true phase layouts smoothly unrolled without spinning phase ramps
+        corrected_phase = np.angle(aligned_fft, deg=True)
+        corrected_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(corrected_phase)))
+        
+        # Minimum phase reconstruction phase align
+        corrected_min_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(min_phase_deg)))
 
-        # Extract magnitude from the raw FFT data
-        mag = np.abs(fft_result)
-        mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))
-
-        # --- Apply Calibration Settings ---
-        if k == 1:
-            if mic_sensitivity is not None and mic_sensitivity > 0:
-                sensitivity_v_pa = mic_sensitivity / 1000.0
-                p_ref = 20e-6
-                spl_offset = -20.0 * np.log10(sensitivity_v_pa * p_ref)
-                mag_db += spl_offset
-
-            if mic_cal_file is not None:
-                # Assuming read_mic_cal_file exists globally in your code environment
-                cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
-                mag_db -= cal_corrections
-
-            mag_db -= 20.0 * np.log10(v_stimulus)
-            if distance is not None:
-                mag_db += 20.0 * np.log10(distance)
-
-        # --- Farina Core Transform Space Adjustments ---
+        # FIXED (Point 3): Apply level density addition correction for harmonics
         corrected_freqs = freqs / k
         corrected_mag_db = mag_db.copy()
         
-        # CORRECTED: Level density correction requires adding energy per harmonic step
         if k > 1:
             corrected_mag_db += 20.0 * np.log10(k)
 
-        # Minimum Phase processing on the clean isolated segment array
-        try:
-            min_phase_signal = scipy.signal.minimum_phase(windowed_segment, method='homomorphic', half=False)
-            min_fft_result = np.fft.rfft(min_phase_signal, n=n_fft)
-            min_phase_deg = np.angle(min_fft_result, deg=True)
-            min_phase_deg = np.rad2deg(np.unwrap(np.deg2rad(min_phase_deg)))
-        except:
-            min_phase_deg = phase_deg_unwrapped.copy()
-
-        # Calculate time delta for resolution tracking
-        delta_f = float(sample_rate / n_fft)
-
-        valid_idx = freqs <= (sample_rate / 2.0)
         harmonic_results[k] = {
-            'freqs': corrected_freqs[valid_idx],
-            'mag_db': corrected_mag_db[valid_idx],
-            'phase': phase_deg_unwrapped[valid_idx],
-            'min_phase': min_phase_deg[valid_idx],
+            'freqs': corrected_freqs,
+            'mag_db': corrected_mag_db,
+            'phase': corrected_phase_unwrapped,
+            'min_phase': corrected_min_phase_unwrapped,
             'delta_frequency': delta_f
         }
 
-    # --- Safe THD percentage calculation block ---
+    # FIXED (Point 4): Low-Frequency Boundary Truncation Matrix for THD Calculations
     if 1 in harmonic_results and len(harmonic_results) > 1:
         f_ref = harmonic_results[1]['freqs']
         h1_mag = harmonic_results[1]['mag_db']
         sum_sq_harmonics_linear = np.zeros_like(f_ref)
         
-        # Create a mask tracking where data is physically valid
-        # THD as a whole is limited by the lowest higher-order harmonic boundary (H2)
+        # THD is structurally limited by the lowest bound of the 2nd harmonic
         valid_thd_mask = f_ref >= (2.0 * start_freq)
         
         for k in range(2, max_harmonic + 1):
             if k in harmonic_results:
-                # Interpolate onto the fundamental grid
+                # Interpolate the harmonic curves onto the common fundamental frequency grid
                 mag_k_interp = np.interp(f_ref, harmonic_results[k]['freqs'], harmonic_results[k]['mag_db'])
                 
-                # Linearize the distortion ratio
+                # Compute proportional distance and convert to standard linear fraction ratio
                 linear_ratio = 10.0 ** ((mag_k_interp - h1_mag) / 20.0)
                 
-                # Mask out invalid low frequency regions for this specific harmonic to prevent noise leakage
+                # Zero out lower non-existent frequency bands for this particular harmonic order
                 harmonic_cutoff = k * start_freq
                 linear_ratio[f_ref < harmonic_cutoff] = 0.0
                 
@@ -460,12 +403,12 @@ def run_farina_analysis(
         thd_linear = np.sqrt(sum_sq_harmonics_linear)
         thd_percent = thd_linear * 100.0
         
-        # Set invalid low frequency regions to NaN so they don't draw artifacts on your UI plots
+        # Mask out out-of-band low frequency elements with NaN to clear plotting curves
         thd_percent[~valid_thd_mask] = np.nan
         harmonic_results['thd_percent'] = thd_percent
-
         
     return harmonic_results
+
 
 
 
