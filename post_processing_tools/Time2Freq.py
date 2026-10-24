@@ -616,6 +616,10 @@ def main():
     ax_time.set_ylabel("Amplitude")
     ax_time.grid(True)
     
+    # Set initial x-axis (time) min and max values to show the main impulse
+    # near the middle of the time data
+    ax_time.set_xlim(0.42 * total_duration_ms, 0.65 * total_duration_ms)
+    
     # Initial gate indices
     initial_gate_time_ms = time_axis[-1] * 1000
     initial_gate_idx = len(full_ir)
@@ -684,11 +688,11 @@ def main():
     textbox_tukey = TextBox(ax_box_tukey, 'TUKEY: ', initial=str(state['tukey_alpha']), textalignment='center')
 
     # HD Max
-    ax_box_hd_max = plt.axes([0.26, 0.10, 0.02, 0.03])
+    ax_box_hd_max = plt.axes([0.24, 0.10, 0.02, 0.03])
     textbox_hd_max = TextBox(ax_box_hd_max, 'HD MAX: ', initial=str(state['hd_max']), textalignment='center')
 
     # Smoothing Octaves
-    ax_box_sm_octaves = plt.axes([0.52, 0.10, 0.02, 0.03])
+    ax_box_sm_octaves = plt.axes([0.48, 0.10, 0.02, 0.03])
     textbox_sm_octaves = TextBox(ax_box_sm_octaves, 'OCTAVE SMOOTHING 1/: ', initial=str(state['smoothing_octaves']), textalignment='center')
 
     # Phase Type
@@ -762,7 +766,7 @@ def main():
                 if state['smoothed_harmonic_results'] is not None:
                     refresh_frequency_plot()
             else:
-                print("Error: HD MAX must be between 2 and 6.")
+                print("Error: valid HD MAX values are 2 through 6.")
                 textbox_hd_max.set_val(str(state['hd_max']))
         except ValueError:
             textbox_hd_max.set_val(str(state['hd_max']))
@@ -864,24 +868,16 @@ def main():
         if state['smoothed_harmonic_results'] is None:
             return
 
-        # 1. Check if we are viewing the exact same plot type as last time
         current_sel = state['selected_harmonic']
         current_phase = state['showing_phase']
-        
-        same_view = (
-            state.get('_last_sel') == current_sel and 
-            state.get('_last_phase') == current_phase
-        )
 
-        # 2. Capture current axis limits before clearing
+        # 1. Capture current X-axis limit (to preserve frequency zoom across views)
         try:
             old_xlim = ax_freq.get_xlim()
-            old_ylim = ax_freq.get_ylim()
         except Exception:
             old_xlim = None
-            old_ylim = None
 
-        # 3. Clear and set up base properties
+        # 2. Clear and set up base properties
         ax_freq.clear()
         ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
         ax_freq.set_xscale('log')
@@ -889,33 +885,40 @@ def main():
 
         results = state['smoothed_harmonic_results']
         sel = current_sel
+        
+        # 1. Define k_idx so it is available for BOTH phase and magnitude views
+        k_idx = int(sel[1:]) if len(sel) > 1 and sel[1:].isdigit() else 1
 
         if current_phase:
+            # --- PHASE VIEW BRANCH ---
             if sel == 'ALL' or sel == 'THD':
                 ax_freq.set_ylabel("Phase (degrees)")
                 ax_freq.set_title("Phase View (Blank for ALL/THD)")
                 state['freq_line_plot'] = []
             else:
-                k_idx = int(sel[1]) if len(sel) > 1 else 1
                 if k_idx <= state['hd_max']:
-                    current_phase_data = results[k_idx]['min_phase'] if state['using_min_phase'] else results[k_idx]['phase']
+                    raw_phase = results[k_idx]['min_phase'] if state['using_min_phase'] else results[k_idx]['phase']
+                    
+                    # Wrap phase into the [-180, 180] degree range
+                    current_phase_data = (raw_phase + 180) % 360 - 180
+
                     title_label = f"Harmonic {k_idx} - {'Minimum Phase' if state['using_min_phase'] else 'Phase'}"
                     line, = ax_freq.plot(results[k_idx]['freqs'], current_phase_data, color='g', lw=1.2)
                     ax_freq.set_ylabel("Phase (degrees)")
                     ax_freq.set_title(title_label)
-                    ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
                     state['freq_line_plot'] = [line]
         else:
+            # --- MAGNITUDE VIEW BRANCH ---
             if sel == 'ALL':
                 freqs = results[1]['freqs']
                 line1, = ax_freq.plot(freqs, results[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
                 lines = [line1]
-                colors = ['orange', 'purple', 'brown', 'pink', 'gray']
+                colors = ['blue', 'tomato', 'green', 'black', 'aqua']
                 for idx, k in enumerate(range(2, state['hd_max'] + 1)):
                     if k in results:
                         l, = ax_freq.plot(results[k]['freqs'], results[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='--', label=f'H{k}')
                         lines.append(l)
-                ax_freq.legend(loc='upper right')
+                ax_freq.legend(loc='lower right', framealpha=1.0, facecolor='white', edgecolor='black')
                 ax_freq.set_ylabel(mag_ylabel)
                 ax_freq.set_title("Frequency Domain Data - All Harmonics Magnitude")
                 state['freq_line_plot'] = lines
@@ -926,35 +929,38 @@ def main():
                 ax_freq.set_title("Total Harmonic Distortion (THD)")
                 state['freq_line_plot'] = [line]
             else:
-                k_idx = int(sel[1]) if len(sel) > 1 else 1
                 if k_idx <= state['hd_max']:
-                    line, = ax_freq.plot(results[k_idx]['freqs'], results[k_idx]['mag_db'], color='r', lw=1.2)
-                    ax_freq.set_ylabel(mag_ylabel)
-                    ax_freq.set_title(f"Frequency Domain Data - Magnitude (Harmonic {k_idx})")
+                    # Compute relative level (dB relative to H1) for H2, H3, etc.
+                    if k_idx > 1 and 1 in results:
+                        # Optional: Use np.interp if array shapes ever mismatch, otherwise direct subtraction:
+                        h1_interp = np.interp(results[k_idx]['freqs'], results[1]['freqs'], results[1]['mag_db'])
+                        mag_data = results[k_idx]['mag_db'] - h1_interp
+                        ylabel_str = "Level Relative to H1 (dB)"
+                        title_str = f"Harmonic {k_idx} - Magnitude Relative to Fundamental"
+                    else:
+                        # H1 stays absolute
+                        mag_data = results[k_idx]['mag_db']
+                        ylabel_str = mag_ylabel
+                        title_str = f"Frequency Domain Data - Magnitude (Harmonic {k_idx})"
+
+                    line, = ax_freq.plot(results[k_idx]['freqs'], mag_data, color='r', lw=1.2)
+                    ax_freq.set_ylabel(ylabel_str)
+                    ax_freq.set_title(title_str)
                     state['freq_line_plot'] = [line]
 
             ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
 
-        # 4. Handle X-axis limits (preserve user frequency zoom if customized)
+        # 3. Handle X-axis limits (preserve frequency zoom)
         if old_xlim and old_xlim != (0.0, 1.0):
             ax_freq.set_xlim(old_xlim)
         else:
             ax_freq.set_xlim(20, sample_rate / 2.0)
 
-        # 5. Handle Y-axis limits intelligently:
-        # Only preserve Y limits if we are looking at the exact same plot view (e.g., smoothing change).
-        # If switching plots (e.g. Magnitude -> THD), auto-scale Y to fit the new data!
-        if same_view and old_ylim and old_ylim != (0.0, 1.0):
-            ax_freq.set_ylim(old_ylim)
-        else:
-            ax_freq.relim()
-            ax_freq.autoscale_view(scalex=False, scaley=True)
+        # 4. Standard auto-scale Y limits for the active view
+        ax_freq.relim()
+        ax_freq.autoscale_view(scalex=False, scaley=True)
 
-        # 6. Store current view signature for the next call
-        state['_last_sel'] = current_sel
-        state['_last_phase'] = current_phase
-
-        # 7. Force the GUI canvas to re-render the updated plot
+        # 5. Refresh canvas
         fig.canvas.draw_idle()
 
     def handle_calc_button(event):
@@ -1002,6 +1008,19 @@ def main():
             
             refresh_frequency_plot()
             print(f"Analysis complete! Resolution: {state['resolution']:.3g} Hz")
+
+            # --- FIX THE HOME BUTTON STACK HERE ---
+            toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
+            if toolbar is not None:
+                # Clear out the old empty startup history stack
+                if hasattr(toolbar, '_views'):
+                    toolbar._views.clear()
+                    toolbar._positions.clear()
+                    toolbar.push_current()  # Pushes the current valid data limits as the new Home baseline!
+                elif hasattr(toolbar, '_nav_stack'):
+                    # For newer matplotlib versions using NavigationStack
+                    toolbar._nav_stack.clear()
+                    toolbar.push_current()
 
     def handle_view_button(event):
         if state['smoothed_harmonic_results'] is not None:
@@ -1156,6 +1175,27 @@ def main():
     btn_prev.on_clicked(handle_cycle_left)
     btn_next.on_clicked(handle_cycle_right)
     
+    # Access the toolbar via the canvas manager
+    toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
+
+    if toolbar is not None:
+        # For Qt Backends (PyQt / PySide)
+        if hasattr(toolbar, 'actions'):
+            for action in toolbar.actions():
+                text = action.text().lower()
+                tooltip = action.toolTip().lower()
+                if 'home' in text or 'reset' in text or 'home' in tooltip or 'reset' in tooltip:
+                    toolbar.removeAction(action)
+                    
+        # For Tkinter (TkAgg) Backend
+        elif hasattr(toolbar, '_buttons'):
+            if 'Home' in toolbar._buttons:
+                toolbar._buttons['Home'].pack_forget() # Hide the home button widget
+
+    # Trigger default zoom tool if desired
+    if toolbar is not None:
+        toolbar.zoom()
+
     plt.show()
 
 
