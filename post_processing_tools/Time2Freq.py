@@ -39,6 +39,11 @@ def parse_arguments():
             required=True,
             help="Path to the Farina inverse filter WAV file."
     )
+    parser.add_argument("--start_f", 
+            type=float, 
+            required=True,
+            help="Start frequency of stimulus sweep in Hz."
+    )
     parser.add_argument("-o", "--output", 
             type=str, 
             default="response",
@@ -98,9 +103,16 @@ def compute_frequency_response(
     fft_result = np.fft.rfft(windowed_data, n=n_fft)
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
 
-    # FIXED: Standardize FFT amplitude scaling to prevent zero-pad energy dilution
     mag = np.abs(fft_result)
-    mag_normalized = mag / (n_fft / 2.0)
+
+    # Coherent gain normalization for the windowed signal
+    window_sum = np.sum(win)
+    if window_sum > 0:
+        # Correct scaling for real FFT (rfft) preserving physical peak amplitude
+        mag_normalized = mag / (window_sum / 2.0)
+    else:
+        mag_normalized = mag
+
     mag_db = 20.0 * np.log10(np.maximum(mag_normalized, 1e-12))
     
     phase_deg = np.angle(fft_result, deg=True)
@@ -246,8 +258,8 @@ def run_farina_analysis(
         sample_rate,
         inv_filter,
         start_freq,
-        gate_start_idx,
-        gate_end_idx,
+        gate_start_offset,  # Changed to relative sample offsets (e.g., -100)
+        gate_end_offset,    # Changed to relative sample offsets (e.g., 1000)
         tukey_alpha,
         mic_cal_file,
         mic_sensitivity,
@@ -303,87 +315,67 @@ def run_farina_analysis(
     linear_peak_idx = np.argmax(np.abs(full_ir))
 
     harmonic_results = {}
-    user_gate_len = gate_end_offset - gate_start_offset
 
-    # 2. Extract and process each harmonic
+    # 2. Extract and process each harmonic cleanly
     for k in range(1, max_harmonic + 1):
         if k == 1:
-            # FIXED (Point 1): Fundamental H1 gates are anchored dynamically relative to the peak
+            # Linear fundamental gate anchored relative to the dynamic peak idx
             start_idx = linear_peak_idx + gate_start_offset
             end_idx = linear_peak_idx + gate_end_offset
+            segment = full_ir[start_idx:end_idx].copy()
         else:
-            # FIXED (Point 3 / Alternative): Use symmetrical fixed-length windows around the computed peak
-            # to replace the dynamic compression errors of the midpoint method
-            delta_t = -duration * np.log(k) / np.log(end_freq / start_freq)
-            harmonic_peak_idx = linear_peak_idx + int(round(delta_t * sample_rate))
-            
-            # Center the user-defined gate size around the harmonic's peak
-            start_idx = harmonic_peak_idx - int(0.1 * user_gate_len)
-            end_idx = start_idx + user_gate_len
-            
-        # Boundary constraints
-        start_idx = max(0, min(start_idx, len(full_ir)))
-        end_idx = max(0, min(end_idx, len(full_ir)))
-        segment = full_ir[start_idx:end_idx].copy()
-        
-        # Ensure segment arrays maintain identical padding lengths
-        if len(segment) < user_gate_len:
-            segment = np.pad(segment, (0, user_gate_len - len(segment)), 'constant')
+            # FIXED: Use Ikonen's midpoint-boundary method to automatically and 
+            # rigorously scale the extraction window width inversely with order (1/k)
+            segment, start_idx = extract_harmonic_segment(
+                full_ir, sample_rate, duration, start_freq, end_freq, linear_peak_idx, k
+            )
 
-        # Pass calibration settings strictly to the linear fundamental (k=1)
-        current_mic_cal = mic_cal_file if k == 1 else None
-        current_mic_sens = mic_sensitivity if k == 1 else None
-        current_dist = distance if k == 1 else None
-
-        # FIXED (Point 2): Compute standard response on the isolated segment array
+        # FIXED: Pass calibration parameters uniformly across all harmonics
         freqs, mag_db, phase_deg, min_phase_deg, delta_f, raw_fft = compute_frequency_response(
             audio_data=segment,
             sample_rate=sample_rate,
             gate_end_idx=len(segment),
             tukey_alpha=tukey_alpha,
-            mic_cal_file=current_mic_cal,
-            mic_sensitivity=current_mic_sens,
+            mic_cal_file=mic_cal_file,
+            mic_sensitivity=mic_sensitivity,
             v_stimulus=v_stimulus,
-            distance=current_dist
+            distance=distance
         )
 
-        # FIXED (Point 3): Phase Rotation Engine (Fourier Shift Theorem)
-        # Calculates time delta of this slice relative to the real physical t=0 peak index
+        # 1. Apply the Phase Matrix Rotation on the raw, uncompressed grid first
         time_delay = (start_idx - linear_peak_idx) / sample_rate
         phase_rotation = np.exp(1j * 2.0 * np.pi * freqs * time_delay)
-        
-        # Apply the rotation to align coordinate grids
         aligned_fft = raw_fft * phase_rotation
         
-        # Extract the true phase layouts smoothly unrolled without spinning phase ramps
+        # 2. Re-extract unwrapped phase maps cleanly from the aligned spectrum
         corrected_phase = np.angle(aligned_fft, deg=True)
         corrected_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(corrected_phase)))
-        
-        # Minimum phase reconstruction phase align
         corrected_min_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(min_phase_deg)))
 
-        # FIXED (Point 3): Apply level density addition correction for harmonics
+        # 3. Apply Farina Core Adjustments: Compress axis and add octave energy density scale
         corrected_freqs = freqs / k
         corrected_mag_db = mag_db.copy()
         
         if k > 1:
             corrected_mag_db += 20.0 * np.log10(k)
 
+        # 4. Mask out empty high frequency range where the harmonic physically stops
+        valid_idx = corrected_freqs <= (sample_rate / (2.0 * k))
+
         harmonic_results[k] = {
-            'freqs': corrected_freqs,
-            'mag_db': corrected_mag_db,
-            'phase': corrected_phase_unwrapped,
-            'min_phase': corrected_min_phase_unwrapped,
+            'freqs': corrected_freqs[valid_idx],
+            'mag_db': corrected_mag_db[valid_idx],
+            'phase': corrected_phase_unwrapped[valid_idx],
+            'min_phase': corrected_min_phase_unwrapped[valid_idx],
             'delta_frequency': delta_f
         }
 
-    # FIXED (Point 4): Low-Frequency Boundary Truncation Matrix for THD Calculations
+    # 3. Low-Frequency Boundary Truncation Matrix for THD Calculations
     if 1 in harmonic_results and len(harmonic_results) > 1:
         f_ref = harmonic_results[1]['freqs']
         h1_mag = harmonic_results[1]['mag_db']
         sum_sq_harmonics_linear = np.zeros_like(f_ref)
         
-        # THD is structurally limited by the lowest bound of the 2nd harmonic
         valid_thd_mask = f_ref >= (2.0 * start_freq)
         
         for k in range(2, max_harmonic + 1):
@@ -394,20 +386,25 @@ def run_farina_analysis(
                 # Compute proportional distance and convert to standard linear fraction ratio
                 linear_ratio = 10.0 ** ((mag_k_interp - h1_mag) / 20.0)
                 
-                # Zero out lower non-existent frequency bands for this particular harmonic order
-                harmonic_cutoff = k * start_freq
-                linear_ratio[f_ref < harmonic_cutoff] = 0.0
+                # FIXED: Mask out high frequencies where this specific harmonic order physically stops existing
+                max_harmonic_freq = sample_rate / (2.0 * k)
+                linear_ratio[f_ref > max_harmonic_freq] = 0.0
                 
                 sum_sq_harmonics_linear += linear_ratio ** 2
                 
         thd_linear = np.sqrt(sum_sq_harmonics_linear)
         thd_percent = thd_linear * 100.0
         
-        # Mask out out-of-band low frequency elements with NaN to clear plotting curves
         thd_percent[~valid_thd_mask] = np.nan
         harmonic_results['thd_percent'] = thd_percent
         
+        harmonic_results['freqs'] = f_ref
+        harmonic_results['mag_db'] = h1_mag
+        harmonic_results['phase'] = harmonic_results[1]['phase']
+        harmonic_results['min_phase'] = harmonic_results[1]['min_phase']
+        
     return harmonic_results
+
 
 
 
@@ -492,6 +489,86 @@ def write_frd_file(filename, freqs, mag_db, phase_deg):
 
 
 
+def fractional_octave_smoothing(freqs, mag_db, fraction=3):
+    """
+    Applies fractional octave smoothing to a frequency response magnitude curve.
+    
+    Parameters:
+    -----------
+    freqs : numpy.ndarray
+        Frequency array in Hz (must be strictly positive).
+    mag_db : numpy.ndarray
+        Magnitude array in dB.
+    fraction : int or float, optional
+        Fractional octave denominator (e.g., 3 for 1/3 octave, 12 for 1/12 octave).
+        
+    Returns:
+    --------
+    numpy.ndarray
+        Smoothed magnitude array in dB.
+    """
+    freqs = np.asarray(freqs, dtype=float)
+    mag_db = np.asarray(mag_db, dtype=float)
+    
+    smoothed_mag_db = np.empty_like(mag_db)
+    
+    # Octave bandwidth factor constant: 2^(1 / (2 * fraction))
+    b = 2.0 ** (1.0 / (2.0 * fraction))
+    
+    for i, f0 in enumerate(freqs):
+        if f0 <= 0:
+            smoothed_mag_db[i] = mag_db[i]
+            continue
+            
+        # Define lower and upper frequency bounds for the smoothing band
+        f_lower = f0 / b
+        f_upper = f0 * b
+        
+        # Find all frequency points falling within the fractional band
+        mask = (freqs >= f_lower) & (freqs <= f_upper)
+        
+        if np.any(mask):
+            # Average the dB values within the band
+            smoothed_mag_db[i] = np.mean(mag_db[mask])
+        else:
+            smoothed_mag_db[i] = mag_db[i]
+            
+    return smoothed_mag_db
+
+
+
+def generate_smoothed_results(harmonic_results, smoothing_fraction):
+    """
+    Takes the raw harmonic_results dictionary and returns a new dictionary 
+    with smoothed magnitude and THD curves at the specified fraction.
+    """
+    if smoothing_fraction is None:
+        # If no smoothing is requested, just return a copy of the raw results
+        return harmonic_results.copy()
+        
+    smoothed_results = {}
+    
+    for k, data in harmonic_results.items():
+        if k == 'thd_percent':
+            # Smooth the THD curve directly
+            smoothed_results['thd_percent'] = fractional_octave_smoothing(
+                harmonic_results['freqs'], data, fraction=smoothing_fraction
+            )
+        elif isinstance(data, dict):
+            # It's a harmonic sub-dictionary (e.g., 1, 2, 3...)
+            smoothed_results[k] = data.copy()
+            if 'mag_db' in data:
+                smoothed_results[k]['mag_db'] = fractional_octave_smoothing(
+                    data['freqs'], data['mag_db'], fraction=smoothing_fraction
+                )
+        else:
+            # Copy over global keys like 'freqs', 'phase', etc., unchanged
+            smoothed_results[k] = data
+            
+    return smoothed_results
+
+
+
 def main():
     # Parse command-line arguments
     args = parse_arguments()
@@ -522,7 +599,7 @@ def main():
         args.mic_sensitivity is not None
         and args.mic_cal is not None
     ):
-        mag_ylabel = f"[dB re 20 uPa @ {args.v_stimulus:.2f}V" 
+        mag_ylabel = f"SPL [dB re 20 uPa @ {args.v_stimulus:.2f}V" 
         if args.distance is not None:
             mag_ylabel += "/1m"
     else:
@@ -542,7 +619,7 @@ def main():
     # Initial gate indices
     initial_gate_time_ms = time_axis[-1] * 1000
     initial_gate_idx = len(full_ir)
-    initial_start_idx = 0  # Or your default pre-roll start sample
+    initial_start_idx = 0  
 
     initial_start_time_ms = (initial_start_idx / sample_rate) * 1000.0
 
@@ -552,19 +629,21 @@ def main():
     
     # State variables
     state = {
-        'gate_idx': initial_gate_idx,            # Existing end gate index
-        'gate_start_idx': initial_start_idx,    # Add this to store your window start index
-        'selecting_gate_step': 0,               # 0 = not selecting, 1 = waiting for start click, 2 = waiting for end click
-        'temp_start_time_ms': 0.0,              # Temporary storage for visual feedback
+        'gate_idx': initial_gate_idx,            
+        'gate_start_idx': initial_start_idx,    
+        'selecting_gate_step': 0,               
+        'temp_start_time_ms': 0.0,              
         'selecting_gate': False,
-        'harmonic_results': None,
+        'raw_harmonic_results': None,
+        'smoothed_harmonic_results': None,
         'selected_harmonic': 'H1',
         'hd_max': 3,
         'freq_line_plot': None,
         'showing_phase': False,
         'using_min_phase': False,
-        'tukey_alpha': 0.02,
-        'resolution': None
+        'tukey_alpha': 0.1,
+        'resolution': None,
+        'smoothing_octaves': 12
     }
     
     initial_win = scipy.signal.get_window(('tukey', state['tukey_alpha']), initial_gate_idx)
@@ -599,22 +678,29 @@ def main():
     btn_min  = Button(ax_btn_min, 'Toggle Phase-MinPhase', color='aliceblue', hovercolor='palegreen')
     btn_save_exit = Button(ax_btn_save_exit, 'Save & Exit', color='aliceblue', hovercolor='palegreen')
     
-    # Row widgets (Tukey width, HD Max, Phase Type)
-    ax_box_tukey = plt.axes([0.11, 0.10, 0.05, 0.03])
+    # Row widgets position specifiers: [left, bottom, width, height]
+    # Tukey width
+    ax_box_tukey = plt.axes([0.08, 0.10, 0.05, 0.03])
     textbox_tukey = TextBox(ax_box_tukey, 'TUKEY: ', initial=str(state['tukey_alpha']), textalignment='center')
 
-    ax_box_hd_max = plt.axes([0.28, 0.10, 0.04, 0.03])
+    # HD Max
+    ax_box_hd_max = plt.axes([0.26, 0.10, 0.02, 0.03])
     textbox_hd_max = TextBox(ax_box_hd_max, 'HD MAX: ', initial=str(state['hd_max']), textalignment='center')
 
-    ax_box_phase_type = plt.axes([0.50, 0.10, 0.13, 0.03])
+    # Smoothing Octaves
+    ax_box_sm_octaves = plt.axes([0.52, 0.10, 0.02, 0.03])
+    textbox_sm_octaves = TextBox(ax_box_sm_octaves, 'OCTAVE SMOOTHING 1/: ', initial=str(state['smoothing_octaves']), textalignment='center')
+
+    # Phase Type
+    ax_box_phase_type = plt.axes([0.65, 0.10, 0.13, 0.03])
     initial_text = 'minimum phase' if state['using_min_phase'] else 'regular phase'
     phase_textbox = TextBox(ax_box_phase_type, 'PHASE TYPE: ', initial=initial_text, textalignment='center')
     phase_textbox.set_active(False)
 
-    # Replacement controls for RadioButtons: Left Button, Dataset Textbox, Right Button
-    ax_btn_prev = plt.axes([0.72, 0.10, 0.035, 0.03])
-    ax_box_dataset = plt.axes([0.760, 0.10, 0.05, 0.03])
-    ax_btn_next = plt.axes([0.815, 0.10, 0.035, 0.03])
+    # Dataset Toggles
+    ax_btn_prev = plt.axes([0.82, 0.10, 0.035, 0.03])
+    ax_box_dataset = plt.axes([0.860, 0.10, 0.05, 0.03])
+    ax_btn_next = plt.axes([0.915, 0.10, 0.035, 0.03])
 
     btn_prev = Button(ax_btn_prev, r'$\blacktriangleleft$', color='aliceblue', hovercolor='palegreen')
     textbox_dataset = TextBox(ax_box_dataset, '', initial=state['selected_harmonic'], textalignment='center')
@@ -673,7 +759,7 @@ def main():
                 print(f"HD MAX updated to: {state['hd_max']}")
                 state['selected_harmonic'] = 'H1'
                 textbox_dataset.set_val('H1')
-                if state['harmonic_results'] is not None:
+                if state['smoothed_harmonic_results'] is not None:
                     refresh_frequency_plot()
             else:
                 print("Error: HD MAX must be between 2 and 6.")
@@ -682,6 +768,39 @@ def main():
             textbox_hd_max.set_val(str(state['hd_max']))
 
     textbox_hd_max.on_submit(submit_hd_max)
+
+    def submit_smoothing(text):
+        try:
+            # Allow users to turn off smoothing by typing "None", "off", "0", or leaving it blank
+            cleaned = text.strip().lower()
+            if cleaned in ('none', 'off', '0', ''):
+                val = None
+            else:
+                val = int(text)
+                
+            # Validate reasonable fractional octave range (e.g., 1 to 48, or None)
+            if val is None or (1 <= val <= 48):
+                state['smoothing_octaves'] = val
+                print(f"Smoothing Octaves updated to: {state['smoothing_octaves']}")
+                
+                # Recompute the smoothed dataset from the immutable raw results
+                if state.get('raw_harmonic_results') is not None:
+                    state['smoothed_harmonic_results'] = generate_smoothed_results(
+                        state['raw_harmonic_results'], state['smoothing_octaves']
+                    )
+                    refresh_frequency_plot()
+            else:
+                print("Error: Smoothing fraction must be between 1 and 48 (or None).")
+                current_val = state['smoothing_octaves']
+                textbox_sm_octaves.set_val(str(current_val) if current_val is not None else "None")
+                
+        except ValueError:
+            print("Error: Invalid smoothing value entered. Please enter an integer.")
+            current_val = state['smoothing_octaves']
+            textbox_sm_octaves.set_val(str(current_val) if current_val is not None else "None")
+
+    textbox_sm_octaves.on_submit(submit_smoothing)
+
 
     def on_click_time_plot(event):
         if state['selecting_gate_step'] > 0 and event.inaxes == ax_time:
@@ -727,7 +846,7 @@ def main():
                     fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect('button_press_event', on_click_time_plot)
-    
+
     def handle_gate_button(event):
         if state['selecting_gate_step'] == 0:
             state['selecting_gate_step'] = 1
@@ -742,67 +861,104 @@ def main():
         fig.canvas.draw_idle()
         
     def refresh_frequency_plot():
-            if state['harmonic_results'] is None:
-                return
+        if state['smoothed_harmonic_results'] is None:
+            return
 
-            ax_freq.clear()
-            ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
-            ax_freq.set_xscale('log')
-            ax_freq.set_xlim(20, sample_rate / 2.0)
-            ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
+        # 1. Check if we are viewing the exact same plot type as last time
+        current_sel = state['selected_harmonic']
+        current_phase = state['showing_phase']
+        
+        same_view = (
+            state.get('_last_sel') == current_sel and 
+            state.get('_last_phase') == current_phase
+        )
 
-            results = state['harmonic_results']
-            sel = state['selected_harmonic']
+        # 2. Capture current axis limits before clearing
+        try:
+            old_xlim = ax_freq.get_xlim()
+            old_ylim = ax_freq.get_ylim()
+        except Exception:
+            old_xlim = None
+            old_ylim = None
 
-            if state['showing_phase']:
-                if sel == 'ALL' or sel == 'THD':
-                    ax_freq.set_ylabel("Phase (degrees)")
-                    ax_freq.set_title("Phase View (Blank for ALL/THD)")
-                    state['freq_line_plot'] = []
-                else:
-                    k_idx = int(sel[1])
-                    if k_idx <= state['hd_max']:
-                        current_phase = results[k_idx]['min_phase_deg'] if state['using_min_phase'] else results[k_idx]['phase_deg']
-                        title_label = f"Harmonic {k_idx} - {'Minimum Phase' if state['using_min_phase'] else 'Phase'}"
-                        line, = ax_freq.plot(results[k_idx]['freqs'], current_phase, color='g', lw=1.2)
-                        ax_freq.set_ylabel("Phase (degrees)")
-                        ax_freq.set_title(title_label)
-                        ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
-                        state['freq_line_plot'] = [line]
+        # 3. Clear and set up base properties
+        ax_freq.clear()
+        ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax_freq.set_xscale('log')
+        ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
+
+        results = state['smoothed_harmonic_results']
+        sel = current_sel
+
+        if current_phase:
+            if sel == 'ALL' or sel == 'THD':
+                ax_freq.set_ylabel("Phase (degrees)")
+                ax_freq.set_title("Phase View (Blank for ALL/THD)")
+                state['freq_line_plot'] = []
             else:
-                if sel == 'ALL':
-                    freqs = results[1]['freqs']
-                    line1, = ax_freq.plot(freqs, results[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
-                    lines = [line1]
-                    colors = ['orange', 'purple', 'brown', 'pink', 'gray']
-                    for idx, k in enumerate(range(2, state['hd_max'] + 1)):
-                        if k in results:
-                            l, = ax_freq.plot(freqs, results[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='--', label=f'H{k}')
-                            lines.append(l)
-                    ax_freq.legend(loc='upper right')
-                    ax_freq.set_ylabel(mag_ylabel)
-                    ax_freq.set_title("Frequency Domain Data - All Harmonics Magnitude")
-                    state['freq_line_plot'] = lines
-                elif sel == 'THD':
-                    freqs = results[1]['freqs']
-                    line, = ax_freq.plot(freqs, results['thd_percent'], color='blue', lw=1.2)
-                    ax_freq.set_ylabel("THD (%)")
-                    ax_freq.set_title("Total Harmonic Distortion (THD)")
+                k_idx = int(sel[1]) if len(sel) > 1 else 1
+                if k_idx <= state['hd_max']:
+                    current_phase_data = results[k_idx]['min_phase'] if state['using_min_phase'] else results[k_idx]['phase']
+                    title_label = f"Harmonic {k_idx} - {'Minimum Phase' if state['using_min_phase'] else 'Phase'}"
+                    line, = ax_freq.plot(results[k_idx]['freqs'], current_phase_data, color='g', lw=1.2)
+                    ax_freq.set_ylabel("Phase (degrees)")
+                    ax_freq.set_title(title_label)
+                    ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
                     state['freq_line_plot'] = [line]
-                else:
-                    k_idx = int(sel[1])
-                    if k_idx <= state['hd_max']:
-                        line, = ax_freq.plot(results[k_idx]['freqs'], results[k_idx]['mag_db'], color='r', lw=1.2)
-                        ax_freq.set_ylabel(mag_ylabel)
-                        ax_freq.set_title(f"Frequency Domain Data - Magnitude (Harmonic {k_idx})")
-                        state['freq_line_plot'] = [line]
+        else:
+            if sel == 'ALL':
+                freqs = results[1]['freqs']
+                line1, = ax_freq.plot(freqs, results[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
+                lines = [line1]
+                colors = ['orange', 'purple', 'brown', 'pink', 'gray']
+                for idx, k in enumerate(range(2, state['hd_max'] + 1)):
+                    if k in results:
+                        l, = ax_freq.plot(results[k]['freqs'], results[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='--', label=f'H{k}')
+                        lines.append(l)
+                ax_freq.legend(loc='upper right')
+                ax_freq.set_ylabel(mag_ylabel)
+                ax_freq.set_title("Frequency Domain Data - All Harmonics Magnitude")
+                state['freq_line_plot'] = lines
+            elif sel == 'THD':
+                freqs = results[1]['freqs']
+                line, = ax_freq.plot(freqs, results['thd_percent'], color='blue', lw=1.2)
+                ax_freq.set_ylabel("THD (%)")
+                ax_freq.set_title("Total Harmonic Distortion (THD)")
+                state['freq_line_plot'] = [line]
+            else:
+                k_idx = int(sel[1]) if len(sel) > 1 else 1
+                if k_idx <= state['hd_max']:
+                    line, = ax_freq.plot(results[k_idx]['freqs'], results[k_idx]['mag_db'], color='r', lw=1.2)
+                    ax_freq.set_ylabel(mag_ylabel)
+                    ax_freq.set_title(f"Frequency Domain Data - Magnitude (Harmonic {k_idx})")
+                    state['freq_line_plot'] = [line]
 
-                ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
+            ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
 
-            fig.canvas.draw_idle()
+        # 4. Handle X-axis limits (preserve user frequency zoom if customized)
+        if old_xlim and old_xlim != (0.0, 1.0):
+            ax_freq.set_xlim(old_xlim)
+        else:
+            ax_freq.set_xlim(20, sample_rate / 2.0)
+
+        # 5. Handle Y-axis limits intelligently:
+        # Only preserve Y limits if we are looking at the exact same plot view (e.g., smoothing change).
+        # If switching plots (e.g. Magnitude -> THD), auto-scale Y to fit the new data!
+        if same_view and old_ylim and old_ylim != (0.0, 1.0):
+            ax_freq.set_ylim(old_ylim)
+        else:
+            ax_freq.relim()
+            ax_freq.autoscale_view(scalex=False, scaley=True)
+
+        # 6. Store current view signature for the next call
+        state['_last_sel'] = current_sel
+        state['_last_phase'] = current_phase
+
+        # 7. Force the GUI canvas to re-render the updated plot
+        fig.canvas.draw_idle()
 
     def handle_calc_button(event):
-        if state['harmonic_results'] is not None:
+        if state['smoothed_harmonic_results'] is not None:
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
             ax_freq.set_xscale('log')
@@ -812,18 +968,23 @@ def main():
             ax_freq.set_title("Frequency Domain Data (Cleared)")
             ax_freq.set_xlabel('Frequency (Hz)')
             fig.canvas.draw_idle()
-            state['harmonic_results'] = None
+            state['smoothed_harmonic_results'] = None
             state['resolution'] = None
             print("Lower plot cleared. All calculated data cleared.")
         else:
             print(f"Computing Farina Method response up to HD {state['hd_max']}...")
+            
+            linear_peak_idx = np.argmax(np.abs(full_ir))
+            gate_start_offset = state['gate_start_idx'] - linear_peak_idx
+            gate_end_offset = state['gate_idx'] - linear_peak_idx
+            
             results = run_farina_analysis(
                 recorded_audio=mic_data,
                 sample_rate=sample_rate,
                 inv_filter=inv_filter,
-                start_freq=10.0,
-                gate_start_idx=state['gate_start_idx'],
-                gate_end_idx=state['gate_idx'],
+                start_freq=args.start_f,
+                gate_start_offset=gate_start_offset,
+                gate_end_offset=gate_end_offset,
                 tukey_alpha=state['tukey_alpha'],
                 mic_cal_file=args.mic_cal,
                 mic_sensitivity=args.mic_sensitivity,
@@ -831,9 +992,11 @@ def main():
                 distance=args.distance,
                 max_harmonic=state['hd_max']
             )
-            state['harmonic_results'] = results
+            state['raw_harmonic_results'] = results
             
-            # Calculate resolution based on window duration
+            octave_smoothing = 12
+            state['smoothed_harmonic_results'] = generate_smoothed_results(results, octave_smoothing)
+            
             window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
             state['resolution'] = 1.0 / window_duration
             
@@ -841,7 +1004,7 @@ def main():
             print(f"Analysis complete! Resolution: {state['resolution']:.3g} Hz")
 
     def handle_view_button(event):
-        if state['harmonic_results'] is not None:
+        if state['smoothed_harmonic_results'] is not None:
             state['showing_phase'] = not state['showing_phase']
             refresh_frequency_plot()
             update_phase_indicator()
@@ -855,7 +1018,7 @@ def main():
     def handle_min_phase_button(event):
         state['using_min_phase'] = not state['using_min_phase']
         update_phase_indicator()
-        if state['harmonic_results'] is not None and state['showing_phase']:
+        if state['smoothed_harmonic_results'] is not None and state['showing_phase']:
             refresh_frequency_plot()
 
     def handle_cycle_left(event):
@@ -867,7 +1030,7 @@ def main():
         new_idx = (curr_idx - 1) % len(h_list)
         state['selected_harmonic'] = h_list[new_idx]
         textbox_dataset.set_val(state['selected_harmonic'])
-        if state['harmonic_results'] is not None:
+        if state['smoothed_harmonic_results'] is not None:
             refresh_frequency_plot()
 
     def handle_cycle_right(event):
@@ -879,105 +1042,111 @@ def main():
         new_idx = (curr_idx + 1) % len(h_list)
         state['selected_harmonic'] = h_list[new_idx]
         textbox_dataset.set_val(state['selected_harmonic'])
-        if state['harmonic_results'] is not None:
+        if state['smoothed_harmonic_results'] is not None:
             refresh_frequency_plot()
 
     def handle_save_exit_button(event):
-            # Ensure data is computed
-            if state['harmonic_results'] is None:
-                print("Computing response before saving...")
-                results = run_farina_analysis(
-                    recorded_audio=mic_data,
-                    sample_rate=sample_rate,
-                    inv_filter=inv_filter,
-                    start_freq=10.0,
-                    gate_start_idx=state['gate_start_idx'],
-                    gate_end_idx=state['gate_idx'],
-                    tukey_alpha=state['tukey_alpha'],
-                    mic_cal_file=args.mic_cal,
-                    mic_sensitivity=args.mic_sensitivity,
-                    v_stimulus=args.v_stimulus,
-                    distance=args.distance,
-                    max_harmonic=state['hd_max']
-                )
-                state['harmonic_results'] = results
-                
-                # Calculate resolution based on window duration
-                window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
-                state['resolution'] = 1.0 / window_duration
-
-            res = state['harmonic_results']
-            base_name = args.output  # args.output holds the base filename
+        if state['smoothed_harmonic_results'] is None:
+            print("Computing response before saving...")
             
-            for k in range(1, state['hd_max'] + 1):
-                if k in res:
-                    h_data = res[k]
-                    phase_to_save = h_data['min_phase_deg'] if state['using_min_phase'] else h_data['phase_deg']
-                    filename_k = f"{base_name}_HD{k}.frd"
-                    write_frd_file(filename_k, h_data['freqs'], h_data['mag_db'], phase_to_save)
-
-            print("Saving plots at 600 DPI in png file format...")
+            linear_peak_idx = np.argmax(np.abs(full_ir))
+            gate_start_offset = state['gate_start_idx'] - linear_peak_idx
+            gate_end_offset = state['gate_idx'] - linear_peak_idx
             
-            # Plot A: Fundamental Magnitude (_FREQ.png)
-            fig_freq, ax_f = plt.subplots(figsize=(8, 5))
-            ax_f.plot(res[1]['freqs'], res[1]['mag_db'], color='r', lw=1.2)
-            ax_f.set_title("Fundamental Frequency Response - Magnitude")
-            ax_f.set_xlabel("Frequency (Hz)")
-            ax_f.set_ylabel(mag_ylabel)
-            ax_f.set_xscale('log')
-            ax_f.set_xlim(20, sample_rate / 2.0)
-            ax_f.grid(True, which='both', linestyle='--', linewidth=0.5)
-            fig_freq.savefig(f"{base_name}_FREQ.png", dpi=600, bbox_inches='tight')
-            plt.close(fig_freq)
+            results = run_farina_analysis(
+                recorded_audio=mic_data,
+                sample_rate=sample_rate,
+                inv_filter=inv_filter,
+                start_freq=args.start_f,
+                gate_start_offset=gate_start_offset,
+                gate_end_offset=gate_end_offset,
+                tukey_alpha=state['tukey_alpha'],
+                mic_cal_file=args.mic_cal,
+                mic_sensitivity=args.mic_sensitivity,
+                v_stimulus=args.v_stimulus,
+                distance=args.distance,
+                max_harmonic=state['hd_max']
+            )
+            state['raw_harmonic_results'] = results
+            
+            octave_smoothing = 12
+            state['smoothed_harmonic_results'] = generate_smoothed_results(results, octave_smoothing)
+             
+            window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
+            state['resolution'] = 1.0 / window_duration
 
-            # Plot B: Fundamental Phase (_PHASE.png)
-            fig_phase, ax_p = plt.subplots(figsize=(8, 5))
-            phase_to_plot = res[1]['min_phase_deg'] if state['using_min_phase'] else res[1]['phase_deg']
-            phase_title = "Fundamental Minimum Phase" if state['using_min_phase'] else "Fundamental Phase"
-            ax_p.plot(res[1]['freqs'], phase_to_plot, color='g', lw=1.2)
-            ax_p.set_title(phase_title)
-            ax_p.set_xlabel("Frequency (Hz)")
-            ax_p.set_ylabel("Phase (degrees)")
-            ax_p.set_xscale('log')
-            ax_p.set_xlim(20, sample_rate / 2.0)
-            ax_p.grid(True, which='both', linestyle='--', linewidth=0.5)
-            fig_phase.savefig(f"{base_name}_PHASE.png", dpi=600, bbox_inches='tight')
-            plt.close(fig_phase)
+        res = state['smoothed_harmonic_results']
+        base_name = args.output  
+        
+        for k in range(1, state['hd_max'] + 1):
+            if k in res:
+                h_data = res[k]
+                phase_to_save = h_data['min_phase'] if state['using_min_phase'] else h_data['phase']
+                filename_k = f"{base_name}_HD{k}.frd"
+                write_frd_file(filename_k, h_data['freqs'], h_data['mag_db'], phase_to_save)
 
-            # Plot C: All Harmonics Magnitude (_HD.png)
-            fig_hd, ax_h = plt.subplots(figsize=(8, 5))
-            freqs = res[1]['freqs']
-            ax_h.plot(freqs, res[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
-            colors = ['orange', 'purple', 'brown', 'pink', 'gray']
-            for idx, k in enumerate(range(2, state['hd_max'] + 1)):
-                if k in res:
-                    ax_h.plot(freqs, res[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='--', label=f'H{k}')
-            ax_h.legend(loc='upper right')
-            ax_h.set_title("Harmonic Distortion - All Harmonics")
-            ax_h.set_xlabel("Frequency (Hz)")
-            ax_h.set_ylabel(mag_ylabel)
-            ax_h.set_xscale('log')
-            ax_h.set_xlim(20, sample_rate / 2.0)
-            ax_h.grid(True, which='both', linestyle='--', linewidth=0.5)
-            fig_hd.savefig(f"{base_name}_HD.png", dpi=600, bbox_inches='tight')
-            plt.close(fig_hd)
+        print("Saving plots at 600 DPI in png file format...")
+        
+        # Plot A: Fundamental Magnitude (_FREQ.png)
+        fig_freq, ax_f = plt.subplots(figsize=(8, 5))
+        ax_f.plot(res[1]['freqs'], res[1]['mag_db'], color='r', lw=1.2)
+        ax_f.set_title("Fundamental Frequency Response - Magnitude")
+        ax_f.set_xlabel("Frequency (Hz)")
+        ax_f.set_ylabel(mag_ylabel)
+        ax_f.set_xscale('log')
+        ax_f.set_xlim(20, sample_rate / 2.0)
+        ax_f.grid(True, which='both', linestyle='--', linewidth=0.5)
+        fig_freq.savefig(f"{base_name}_FREQ.png", dpi=600, bbox_inches='tight')
+        plt.close(fig_freq)
 
-            # Plot D: Total Harmonic Distortion (_THD.png)
-            fig_thd, ax_t = plt.subplots(figsize=(8, 5))
-            ax_t.plot(res[1]['freqs'], res['thd_percent'], color='blue', lw=1.2)
-            ax_t.set_title("Total Harmonic Distortion (THD)")
-            ax_t.set_xlabel("Frequency (Hz)")
-            ax_t.set_ylabel("THD (%)")
-            ax_t.set_xscale('log')
-            ax_t.set_xlim(20, sample_rate / 2.0)
-            ax_t.grid(True, which='both', linestyle='--', linewidth=0.5)
-            fig_thd.savefig(f"{base_name}_THD.png", dpi=600, bbox_inches='tight')
-            plt.close(fig_thd)
+        # Plot B: Fundamental Phase (_PHASE.png)
+        fig_phase, ax_p = plt.subplots(figsize=(8, 5))
+        phase_to_plot = res[1]['min_phase'] if state['using_min_phase'] else res[1]['phase']
+        phase_title = "Fundamental Minimum Phase" if state['using_min_phase'] else "Fundamental Phase"
+        ax_p.plot(res[1]['freqs'], phase_to_plot, color='g', lw=1.2)
+        ax_p.set_title(phase_title)
+        ax_p.set_xlabel("Frequency (Hz)")
+        ax_p.set_ylabel("Phase (degrees)")
+        ax_p.set_xscale('log')
+        ax_p.set_xlim(20, sample_rate / 2.0)
+        ax_p.grid(True, which='both', linestyle='--', linewidth=0.5)
+        fig_phase.savefig(f"{base_name}_PHASE.png", dpi=600, bbox_inches='tight')
+        plt.close(fig_phase)
 
-            print("All data files and plots successfully saved.")
-            print("Closing application.")
-            plt.close('all')
-            sys.exit(0)
+        # Plot C: All Harmonics Magnitude (_HD.png)
+        fig_hd, ax_h = plt.subplots(figsize=(8, 5))
+        freqs = res[1]['freqs']
+        ax_h.plot(freqs, res[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
+        colors = ['orange', 'purple', 'brown', 'pink', 'gray']
+        for idx, k in enumerate(range(2, state['hd_max'] + 1)):
+            if k in res:
+                ax_h.plot(res[k]['freqs'], res[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='--', label=f'H{k}')
+        ax_h.legend(loc='upper right')
+        ax_h.set_title("Harmonic Distortion - All Harmonics")
+        ax_h.set_xlabel("Frequency (Hz)")
+        ax_h.set_ylabel(mag_ylabel)
+        ax_h.set_xscale('log')
+        ax_h.set_xlim(20, sample_rate / 2.0)
+        ax_h.grid(True, which='both', linestyle='--', linewidth=0.5)
+        fig_hd.savefig(f"{base_name}_HD.png", dpi=600, bbox_inches='tight')
+        plt.close(fig_hd)
+
+        # Plot D: Total Harmonic Distortion (_THD.png)
+        fig_thd, ax_t = plt.subplots(figsize=(8, 5))
+        ax_t.plot(res[1]['freqs'], res['thd_percent'], color='blue', lw=1.2)
+        ax_t.set_title("Total Harmonic Distortion (THD)")
+        ax_t.set_xlabel("Frequency (Hz)")
+        ax_t.set_ylabel("THD (%)")
+        ax_t.set_xscale('log')
+        ax_t.set_xlim(20, sample_rate / 2.0)
+        ax_t.grid(True, which='both', linestyle='--', linewidth=0.5)
+        fig_thd.savefig(f"{base_name}_THD.png", dpi=600, bbox_inches='tight')
+        plt.close(fig_thd)
+
+        print("All data files and plots successfully saved.")
+        print("Closing application.")
+        plt.close('all')
+        sys.exit(0)
 
     btn_gate.on_clicked(handle_gate_button)
     btn_calc.on_clicked(handle_calc_button)
