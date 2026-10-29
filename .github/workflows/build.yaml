@@ -57,43 +57,57 @@ jobs:
       - name: Build Project
         run: cmake --build build --config Release
 
-      # --- Package Windows Programs into a .zip ---
+      # --- Package Windows ---
       - name: Package Windows Binaries
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path "dist"
           New-Item -ItemType Directory -Force -Path "dist/Windows-programs"
-          
-          # Copy executables from the Release build folder
           Copy-Item "build/Release/DaDooRunRun.exe" "dist/Windows-programs/"
           Copy-Item "build/Release/ProbeAudioDevs.exe" "dist/Windows-programs/"
-          
-          # Copy portaudio.dll from the global vcpkg installation path
           Copy-Item "C:/vcpkg/installed/x64-windows/bin/portaudio.dll" "dist/Windows-programs/"
-          
-          # Create the zip archive
           Compress-Archive -Path "dist/Windows-programs/*" -DestinationPath "dist/Windows-programs.zip"
 
-      # --- Package Linux Programs into a .tar.gz ---
+      # --- Package Linux ---
       - name: Package Linux Binaries
         if: matrix.os == 'ubuntu-24.04'
         run: |
           mkdir -p dist/Linux-programs
-          
-          # Verify and copy executables with fallback/error reporting
-          if [ -f "build/DaDooRunRun" ]; then
-            cp build/DaDooRunRun dist/Linux-programs/
-          else
-            echo "Error: DaDooRunRun binary not found in build/"
-            exit 1
-          fi
-
-          if [ -f "build/ProbeAudioDevs" ]; then
-            cp build/ProbeAudioDevs dist/Linux-programs/
-          else
-            echo "Error: ProbeAudioDevs binary not found in build/"
-            exit 1
-          fi
-
-          # Create the tar.gz archive
+          cp build/DaDooRunRun dist/Linux-programs/
+          cp build/ProbeAudioDevs dist/Linux-programs/
           cd dist && tar -czvf Linux-programs.tar.gz Linux-programs
+
+      # --- Upload Artifacts to GitHub Actions Runner Storage ---
+      - name: Upload Windows Artifact
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-programs
+          path: dist/Windows-programs.zip
+
+      - name: Upload Linux Artifact
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux-programs
+          path: dist/Linux-programs.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+          merge-multiple: true
+
+      - name: Upload Binaries to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            downloaded-artifacts/Windows-programs.zip
+            downloaded-artifacts/Linux-programs.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
