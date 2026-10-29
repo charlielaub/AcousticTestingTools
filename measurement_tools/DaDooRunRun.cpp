@@ -761,6 +761,13 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 
 
 
+#include <vector>
+#include <complex>
+#include <cmath>
+#include <algorithm>
+#include <iostream>
+
+// Assuming DataContainer and pocketfft are defined in your environment
 DataContainer perform_QA_and_time_alignment(
     const DataContainer& raw_data,
     float sample_rate,
@@ -794,14 +801,14 @@ DataContainer perform_QA_and_time_alignment(
     pocketfft::stride_t stride_in_bwd = { sizeof(std::complex<float>) };
     pocketfft::stride_t stride_out_bwd = { sizeof(float) };
 
-    // --- AUTOMATIC CONSENSUS ANCHOR SELECTION (Based on Measurement Data) ---
+    // --- AUTOMATIC CONSENSUS ANCHOR SELECTION ---
     size_t best_anchor_idx = 0;
     if (num_runs > 1) {
         std::cout << "\n--- Evaluating Measurement Consistency & Selecting Consensus Anchor ---\n";
         
         std::vector<float> anchor_scores(num_runs, 0.0f);
 
-        // Precompute FFTs and energy prefix sums for all measurement runs
+        // Precompute unscaled FFTs (fct = 1.0f) and energy prefix sums for all measurement runs
         std::vector<std::vector<std::complex<float>>> all_MIC_f(num_runs, std::vector<std::complex<float>>(num_freq_bins));
         std::vector<std::vector<float>> all_pref_2(num_runs, std::vector<float>(signal_size + 1, 0.0f));
 
@@ -813,7 +820,7 @@ DataContainer perform_QA_and_time_alignment(
                 all_pref_2[i][n + 1] = all_pref_2[i][n] + val * val;
             }
             pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD,
-                           mic_padded.data(), all_MIC_f[i].data(), fft_norm);
+                           mic_padded.data(), all_MIC_f[i].data(), 1.0f);
         }
 
         auto get_energy = [&](size_t run_idx, int start, int end) {
@@ -827,15 +834,15 @@ DataContainer perform_QA_and_time_alignment(
             for (size_t j = 0; j < num_runs; ++j) {
                 if (i == j) continue;
 
-                // Cross-spectrum between measurement run i and run j
+                // Cross-spectrum between measurement run i and run j (unscaled)
                 std::vector<std::complex<float>> Z_f(num_freq_bins);
                 for (size_t f = 0; f < num_freq_bins; ++f) {
-                    Z_f[f] = std::conj(all_MIC_f[i][f]) * all_MIC_f[j][f] * fft_norm;
+                    Z_f[f] = std::conj(all_MIC_f[i][f]) * all_MIC_f[j][f];
                 }
 
                 std::vector<float> xcorr(fft_size);
                 pocketfft::c2r(shape_bwd, stride_in_bwd, stride_out_bwd, axes, pocketfft::BACKWARD,
-                               Z_f.data(), xcorr.data(), 1.0f);
+                               Z_f.data(), xcorr.data(), fft_norm); // Apply fft_norm here
 
                 // Find peak NCC within max_lag for this pair
                 float max_pair_ncc = -1.0f;
@@ -885,14 +892,14 @@ DataContainer perform_QA_and_time_alignment(
     static constexpr float min_ncc_threshold = 0.95f;
     int lag_threshold = static_cast<int>(0.95f * max_lag);
 
-    // Precompute forward FFT and energy prefix sums for the chosen anchor's measurement data
+    // Precompute forward FFT (unscaled) and energy prefix sums for the chosen anchor
     std::vector<float> anchor_mic_padded(fft_size, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
         anchor_mic_padded[n] = mic_history[best_anchor_idx][n];
     }
     std::vector<std::complex<float>> MIC_anchor_f(num_freq_bins);
     pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD,
-                   anchor_mic_padded.data(), MIC_anchor_f.data(), fft_norm);
+                   anchor_mic_padded.data(), MIC_anchor_f.data(), 1.0f);
 
     std::vector<float> pref_anchor_2(signal_size + 1, 0.0f);
     for (size_t n = 0; n < signal_size; ++n) {
@@ -906,9 +913,8 @@ DataContainer perform_QA_and_time_alignment(
 
     // Loop through all other runs and align/filter them against the robust measurement anchor
     for (size_t i = 0; i < num_runs; ++i) {
-        if (i == best_anchor_idx) continue; // Skip the anchor itself since it's already added
+        if (i == best_anchor_idx) continue;
 
-        // Precompute prefix sums for Run i measurement energy (y^2)
         std::vector<float> pref_mic_i_2(signal_size + 1, 0.0f);
         for (size_t n = 0; n < signal_size; ++n) {
             float val = mic_history[i][n];
@@ -919,7 +925,6 @@ DataContainer perform_QA_and_time_alignment(
             return pref_mic_i_2[end + 1] - pref_mic_i_2[start];
         };
 
-        // Prepare and forward FFT padded Run i measurement signal
         std::vector<float> mic_i_padded(fft_size, 0.0f);
         for (size_t n = 0; n < signal_size; ++n) {
             mic_i_padded[n] = mic_history[i][n];
@@ -928,16 +933,16 @@ DataContainer perform_QA_and_time_alignment(
         pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD,
                        mic_i_padded.data(), MIC_I_f.data(), 1.0f);
 
-        // Multiply cross-spectrum in frequency domain: conj(MIC_anchor) * MIC_I
+        // Multiply cross-spectrum (unscaled)
         std::vector<std::complex<float>> Z_f(num_freq_bins);
         for (size_t f = 0; f < num_freq_bins; ++f) {
-            Z_f[f] = std::conj(MIC_anchor_f[f]) * MIC_I_f[f] * fft_norm;
+            Z_f[f] = std::conj(MIC_anchor_f[f]) * MIC_I_f[f];
         }
 
-        // Inverse FFT to get full cross-correlation array
+        // Inverse FFT with proper normalization
         std::vector<float> xcorr(fft_size);
         pocketfft::c2r(shape_bwd, stride_in_bwd, stride_out_bwd, axes, pocketfft::BACKWARD,
-                       Z_f.data(), xcorr.data(), 1.0f);
+                       Z_f.data(), xcorr.data(), fft_norm);
 
         int range_size = 2 * max_lag + 1;
         std::vector<float> corr_scores(range_size, -1e20f);
@@ -966,19 +971,21 @@ DataContainer perform_QA_and_time_alignment(
             }
         }
 
-        // Refine lag to sub-sample precision using Parabolic Interpolation
+        // Refine lag to sub-sample precision using Parabolic Interpolation (with bounds protection)
         float refined_lag = static_cast<float>(best_lag);
         int best_idx = best_lag + max_lag;
 
         if (best_lag > -max_lag && best_lag < max_lag) {
-            float y_minus = corr_scores[best_idx - 1];
-            float y_zero  = corr_scores[best_idx];
-            float y_plus  = corr_scores[best_idx + 1];
+            if (best_idx > 0 && best_idx < range_size - 1) {
+                float y_minus = corr_scores[best_idx - 1];
+                float y_zero  = corr_scores[best_idx];
+                float y_plus  = corr_scores[best_idx + 1];
 
-            float denominator = (y_minus - 2.0f * y_zero + y_plus);
-            if (std::abs(denominator) > 1e-5f) {
-                float delta = 0.5f * (y_minus - y_plus) / denominator;
-                refined_lag += delta;
+                float denominator = (y_minus - 2.0f * y_zero + y_plus);
+                if (std::abs(denominator) > 1e-5f) {
+                    float delta = 0.5f * (y_minus - y_plus) / denominator;
+                    refined_lag += delta;
+                }
             }
         }
 
@@ -1004,7 +1011,6 @@ DataContainer perform_QA_and_time_alignment(
         } 
         else {
             std::cout << "  --> Correcting the timing error for this run. RUN ACCEPTED for further processing.\n";
-            // Apply the correction derived from the measurement data to BOTH streams
             shifted_ref = fractional_delay_filter(ref_history[i], -refined_lag);
             shifted_mic = fractional_delay_filter(mic_history[i], -refined_lag);
         }
@@ -1599,7 +1605,7 @@ int main(int argc, char* argv[]) {
     std::string filename;
 
     //Write measurement data as WAV file
-    filetype = "_m";
+    filetype = "m";
     filename = args.basefilename + filetype + ".wav";
     if (write_wav_file_plus_info(args, filetype, averaged_mic)) {
         std::cout << "Measurement data WAV file and custom xDAT metadata written to the file " << filename << "\n";
@@ -1609,7 +1615,7 @@ int main(int argc, char* argv[]) {
     }
 
     //Write stimulus data as WAV file
-    filetype = "_s";
+    filetype = "s";
     filename = args.basefilename + filetype + ".wav";
     if (write_wav_file_plus_info(args, filetype, chirp)) {
         std::cout << "Stimulus WAV file and custom xDAT metadata written to the file " << filename << "\n";
@@ -1619,7 +1625,7 @@ int main(int argc, char* argv[]) {
     }
 
     //Write H1 time domain response to WAV file
-    filetype = "_h1";
+    filetype = "h1";
     filename = args.basefilename + filetype + ".wav";
     if (write_wav_file_plus_info(args, filetype, h1_ir)) {
         std::cout << "Impulse response WAV file and custom xDAT metadata written to the file " << filename << "\n";
@@ -1630,7 +1636,7 @@ int main(int argc, char* argv[]) {
 
     //Generate and save the Farina Inverse Filter as WAV file
     std::vector<float> inv_filter = generate_Farina_inverse_filter(args);
-    filetype = "_Fif";
+    filetype = "Fif";
     filename = args.basefilename + filetype + ".wav";
     if (write_wav_file_plus_info(args, filetype, inv_filter)) {
         std::cout << "Farina inverse filter WAV file and custom xDAT metadata written to the file " << filename << "\n";
