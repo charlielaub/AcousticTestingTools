@@ -22,6 +22,7 @@
 #include <string>
 #include <iomanip>
 #include <vector>
+#include <complex>
 #include <cmath>
 #include <string>
 #include <fstream>
@@ -34,8 +35,13 @@
 #include <thread>
 #include <memory>
 #include <stdexcept>
+#include <cstdint> // Required for uint32_t
+#include <cstddef>
+#include <cctype>
+#include <unordered_set>
+
 #include <portaudio.h>
-#include <Eigen/Dense>
+#include "pocketfft_hdronly.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -56,16 +62,24 @@
 #include <fcntl.h>
 #endif
 
+
+//Structure to hold stimulus and measurement data sets
+struct DataContainer {
+    std::vector<std::vector<float>> stimulus_data;
+    std::vector<std::vector<float>> measurement_data;
+};
+
+
 // Struct to handle parsed arguments
 struct AppArgs {
-    std::string mic_output_file = "mic_data.wav";
-    std::string stimulus_output_file = "";
-    std::string farina_filter_file = "";
+    std::string basefilename = "results";
     int sample_rate = 48000;
     float chirp_rate = 2.0f;
     float start_freq = 1.0f;
+    float end_freq = 0.99f * sample_rate;
+    float HF_window_startF = 0.975f * end_freq;
     int repetitions = 1;
-    float alignment_window = 5.0;
+    float alignment_window = 5.0f;
     float warm_up_delay = 3.0f;
     float rt60 = 3.0f;
     float mean_wait = 1.0f;
@@ -75,8 +89,10 @@ struct AppArgs {
     int output_device_idx = -1;
     int out_channels[2] = {-1, -1};
     int in_channels[2] = {-1, -1};
+    uint32_t timestamp;
+    bool only_save_measurement = false;
 
-    // Helper method to print all parameters with aligned colons
+    // Helper method to print all parameters and their values with aligned colons
     void print() const {
         const int name_width = 20; // Matches length of "stimulus_output_file"
 
@@ -84,9 +100,7 @@ struct AppArgs {
         std::cout << "============ Program Parameters ============\n";
         std::cout << std::right; // Ensure right-alignment
         
-        std::cout << std::setw(name_width) << "mic output file"      << " : " << mic_output_file << "\n";
-        std::cout << std::setw(name_width) << "stimulus output file" << " : " << (stimulus_output_file.empty() ? "(none)" : stimulus_output_file) << "\n";
-        std::cout << std::setw(name_width) << "Farina filter file"   << " : " << (farina_filter_file.empty() ? "(none)" : farina_filter_file) << "\n";
+        std::cout << std::setw(name_width) << "base file name"       << " : " << basefilename << "\n";
         std::cout << std::setw(name_width) << "sample rate"          << " : " << sample_rate << " Hz\n";
         std::cout << std::setw(name_width) << "chirp rate"           << " : " << chirp_rate << " seconds per decade Hz\n";
         std::cout << std::setw(name_width) << "start freq"           << " : " << start_freq << " Hz\n";
@@ -98,9 +112,10 @@ struct AppArgs {
         std::cout << std::setw(name_width) << "level"                << " : " << level << " dB\n";
         std::cout << std::setw(name_width) << "api idx"              << " : " << api_idx << "\n";
         std::cout << std::setw(name_width) << "input device idx"     << " : " << input_device_idx << "\n";
+        std::cout << std::setw(name_width) << "input channels"       << " : [" << in_channels[0] << ", " << in_channels[1] << "]\n";
         std::cout << std::setw(name_width) << "output device idx"    << " : " << output_device_idx << "\n";
         std::cout << std::setw(name_width) << "output channels"      << " : [" << out_channels[0] << ", " << out_channels[1] << "]\n";
-        std::cout << std::setw(name_width) << "input channels"       << " : [" << in_channels[0] << ", " << in_channels[1] << "]\n";
+        std::cout << std::setw(name_width) << "min_outfiles"         << " : [" << std::boolalpha << only_save_measurement << std::noboolalpha << "]\n";
         
         std::cout << "============================================\n";
         std::cout << "\n";
@@ -114,28 +129,28 @@ void show_help_info(const char* prog_name) {
     std::cout << "Acoustic Testing Measurement Tool\n\n"
               << "Usage: " << prog_name << " [options]\n\n"
               << "Options:\n"
-              << "  --mic_output_file, -m <file>       destination WAV file for the mic data (default: mic_data.wav)\n"
-              << "  --stimulus_output_file, -s <file>  destination WAV file for the stimulus\n"
-              << "  --farina_filter_file, -f <file>    destination WAV file for the Farina inverse filter\n"
-              << "  --level <float>                    RMS stimulus level in dB <= 0.0 (default: -10.0)\n"
-              << "  --sample_rate <int>                Sampling rate in Hz (default: 48000)\n"
-              << "  --chirp_rate <float>               Chirp rate in seconds per decade of frequency (default: 2.0)\n"
-              << "  --start_freq <float>               Start frequency in Hz (default: 1.0)\n"
-              << "  --repetitions <int>                Number of measurement runs (default: 1)\n"
-              << "  --alignment_window <float>         Cross-Correlation Alignment Window in milliseconds (default: 5.0)\n"
-              << "  --warm_up_delay <float>            Length of DAC warm-up delay in seconds (default: 3.0)\n"
-              << "  --rt60 <float>                     Room decay time in seconds (default: 3.0)\n"
-              << "  --mean_wait <float>                Average pause between runs in seconds (default: 3.0)\n"
-              << "  --api_idx <int>                    PortAudio host API index\n"
-              << "  --input_device_idx <int>           PortAudio hardware input device index\n"
-              << "  --output_device_idx <int>          PortAudio hardware output device index\n"
-              << "  --input_channels <id1> <id2>       Two physical input channel indices\n"
-              << "  --output_channels <id1> <id2>      Two physical output channel indices\n"
-              << "  --help, -h                         Display this help message and exit\n\n"
+              << "  --basefilename, -b <file>           base file name for output files (default: results)\n"
+              << "  --level, -l <float>                 RMS stimulus level in dB <= 0.0 (default: -10.0)\n"
+              << "  --sample_rate, -r <int>             Sampling rate in Hz (default: 48000)\n"
+              << "  --chirp_rate, -c <float>            Chirp rate in seconds per decade of frequency (default: 2.0)\n"
+              << "  --start_freq, -s <float>            Start frequency in Hz (default: 1.0)\n"
+              << "  --repetitions, -n <int>             Number of measurement runs (default: 1)\n"
+              << "  --alignment_window <float>          Cross-Correlation Alignment Window in milliseconds (default: 5.0)\n"
+              << "  --warm_up_delay <float>             Length of DAC warm-up delay in seconds (default: 3.0)\n"
+              << "  --rt60 <float>                      Room decay time in seconds (default: 3.0)\n"
+              << "  --mean_wait, -w <float>             Average pause between runs in seconds (default: 3.0)\n"
+              << "  --api_idx, -a <int>                 PortAudio host API index\n"
+              << "  --input_device_idx, -i <int>        PortAudio hardware input device index\n"
+              << "  --output_device_idx, -o <int>       PortAudio hardware output device index\n"
+              << "  --input_channels, -I <id1> <id2>    Two physical input channel indices\n"
+              << "  --output_channels, -O <id1> <id2>   Two physical output channel indices\n"
+              << "  --min_outfiles, -m                  Do not save the Farina inverse filter or Stimulus.\n"
+              << "  --help, -h                          Display this help message and exit\n\n"
               << "NOTES:\n"
-              << "    The command line parameters may be provided in any order.\n"
+              << "    Both output channels produce the same stimulus.\n"
               << "    The first input channel records the stimulus signal.\n"
-              << "    The second input channel records the microphone signal.\n\n";
+              << "    The second input channel records the microphone signal.\n"
+              << "    Command line parameters may be provided in any order.\n\n";
 }
 
 
@@ -195,35 +210,27 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             std::exit(0);
         }
         // --- String outputs ---
-        else if (arg == "--mic_output_file" || arg == "-m") {
+        else if (arg == "--basefilename" || arg == "-b") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
-            args.mic_output_file = argv[++i];
-        }
-        else if (arg == "--stimulus_output_file" || arg == "-s") {
-            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
-            args.stimulus_output_file = argv[++i];
-        }
-        else if (arg == "--farina_filter_file" || arg == "-f") {
-            if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
-            args.farina_filter_file = argv[++i];
+            args.basefilename = argv[++i];
         }
         
         // --- Strictly positive integers (> 0) ---
-        else if (arg == "--sample_rate") {
+        else if (arg == "--sample_rate" || arg == "-r") { // Fixed -h conflict with --help
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.sample_rate, 1)) std::exit(1);
         }
-        else if (arg == "--repetitions") {
+        else if (arg == "--repetitions" || arg == "-n") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.repetitions, 1)) std::exit(1);
         }
         
         // --- Strictly positive floats (> 0.0) ---
-        else if (arg == "--chirp_rate") {
+        else if (arg == "--chirp_rate" || arg == "-c") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateFloat(arg, argv[++i], args.chirp_rate, true)) std::exit(1);
         }
-        else if (arg == "--start_freq") {
+        else if (arg == "--start_freq" || arg == "-s") { // Fixed malformed string literal syntax
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateFloat(arg, argv[++i], args.start_freq, true)) std::exit(1);
         }
@@ -239,30 +246,30 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateFloat(arg, argv[++i], args.rt60, true)) std::exit(1);
         }
-        else if (arg == "--mean_wait") {
+        else if (arg == "--mean_wait" || arg == "-w") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateFloat(arg, argv[++i], args.mean_wait, true)) std::exit(1);
         }
         
         // --- Integers zero or greater (>= 0) ---
-        else if (arg == "--api_idx") {
+        else if (arg == "--api_idx" || arg == "-a") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.api_idx, 0)) std::exit(1);
         }
-        else if (arg == "--input_device_idx") {
+        else if (arg == "--input_device_idx" || arg == "-i") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.input_device_idx, 0)) std::exit(1);
         }
-        else if (arg == "--output_device_idx") {
+        else if (arg == "--output_device_idx" || arg == "-o") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.output_device_idx, 0)) std::exit(1);
         }
-        else if (arg == "--input_channels") {
+        else if (arg == "--input_channels" || arg == "-I") {
             if (i + 2 >= argc) { std::cerr << "Error: --input_channels requires 2 integer values.\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.in_channels[0], 0)) std::exit(1);
             if (!parseAndValidateInt(arg, argv[++i], args.in_channels[1], 0)) std::exit(1);
         }
-        else if (arg == "--output_channels") {
+        else if (arg == "--output_channels" || arg == "-O") {
             if (i + 2 >= argc) { std::cerr << "Error: --output_channels requires 2 integer values.\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.out_channels[0], 0)) std::exit(1);
             if (!parseAndValidateInt(arg, argv[++i], args.out_channels[1], 0)) std::exit(1);
@@ -278,6 +285,11 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             }
         }
         
+        // --- Boolean Flag ---
+        else if (arg == "--min_outfiles" || arg == "-m") {
+            args.only_save_measurement = true;
+        }
+
         // --- Catch-All Error Case ---
         else {
             std::cerr << "Error: Unknown or unrecognized command line option: '" << arg << "'\n";
@@ -291,51 +303,172 @@ AppArgs parse_arguments(int argc, char* argv[]) {
 
 
 
-// Write 32-bit Float Mono WAV File
-void write_float32_wav(const std::string& filename, const std::vector<float>& data, int sample_rate) {
-    std::string full_name = filename;
-    if (full_name.size() < 4 || full_name.substr(full_name.size() - 4) != ".wav") {
-        full_name += ".wav";
+std::string sanitizeFilename(const std::string& input, const std::string& defaultName) {
+    if (input.empty()) {
+        return defaultName;
     }
 
-    std::ofstream file(full_name, std::ios::binary);
+    std::string result;
+    result.reserve(input.size());
+
+    bool lastWasSpace = false;
+
+    for (char c : input) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        
+        // 1. Replace forbidden characters with '_'
+        if (uc < 32 || c == '<' || c == '>' || c == ':' || c == '"' || 
+            c == '/' || c == '\\' || c == '|' || c == '?' || c == '*') {
+            result.push_back('_');
+            lastWasSpace = false;
+        } 
+        // 2. Handle spaces: collapse multiple interior spaces into a single '_'
+        else if (std::isspace(uc)) {
+            // Only add an underscore if we aren't at the very beginning and the last char wasn't already a space/underscore converter
+            if (!result.empty() && !lastWasSpace) {
+                result.push_back('_');
+            }
+            lastWasSpace = true;
+        } 
+        else {
+            result.push_back(c);
+            lastWasSpace = false;
+        }
+    }
+
+    // 3. Trim leading and trailing spaces, dots, and stray underscores
+    size_t start = result.find_first_not_of(" ._");
+    if (start == std::string::npos) {
+        return defaultName; // String consisted only of spaces, dots, or invalid chars
+    }
+    size_t end = result.find_last_not_of(" ._");
+    result = result.substr(start, end - start + 1);
+
+    if (result.empty()) {
+        return defaultName;
+    }
+
+    // 4. Handle Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    std::string upperResult = result;
+    for (char& c : upperResult) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    
+    size_t dotPos = upperResult.find('.');
+    std::string baseName = (dotPos == std::string::npos) ? upperResult : upperResult.substr(0, dotPos);
+
+    const std::unordered_set<std::string> reservedNames = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
+    if (reservedNames.find(baseName) != reservedNames.end()) {
+        result = "_" + result; // Prefix with underscore to neutralize reserved status
+    }
+
+    return result;
+}
+
+
+
+// Returns the current Unix timestamp (seconds since Jan 1, 1970) as a 32-bit unsigned int
+uint32_t get_current_timestamp_32() {
+    auto now = std::chrono::system_clock::now();
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch());
+    return static_cast<uint32_t>(seconds.count());
+}
+
+
+
+/* Write 32-bit Float Mono WAV File, ending with a custom chunk containing several
+   parameters used to peform the measurement:
+      identifier <> variable
+            f0sw <> args.start_freq);
+            f1sw <> args.end_freq);
+            fhfw <> args.HF_window_startF);
+            rchr <> args.chirp_rate);
+            levl <> args.level);
+            date <> args.timestamp);
+*/    
+bool write_wav_file_plus_info(AppArgs& args, const std::string& filetype, const std::vector<float>& data) {
+    // Construct filename using basefilename and the provided filetype suffix
+    std::string filename = args.basefilename + "_" + filetype + ".wav";
+    std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "Error: Could not open file for writing: " << full_name << std::endl;
-        return;
+        std::cerr << "Error: Could not open file for writing: " << filename << "\n";
+        return false;
     }
 
-    int num_samples = data.size();
-    int byte_rate = sample_rate * 4;
+    uint32_t sample_rate = static_cast<uint32_t>(args.sample_rate);
+    uint32_t num_samples = static_cast<uint32_t>(data.size());
+    uint32_t data_bytes = num_samples * sizeof(float);
 
-    // Write RIFF Header
+    // Custom chunk payload size: 7 fields, each consisting of a 4-byte tag + 4-byte value = 56 bytes
+    uint32_t xdat_payload_size = 56; 
+
+    // RIFF chunk size = Total file size - 8 bytes (excludes 'RIFF' tag and 4-byte size field itself)
+    // Structure: 4 (WAVE) + 24 (fmt chunk) + (8 + data_bytes) (data chunk) + (8 + xdat_payload_size) (xDAT chunk)
+    uint32_t riff_chunk_size = 4 + 24 + (8 + data_bytes) + (8 + xdat_payload_size);
+
+    // 1. Write RIFF Header
     file.write("RIFF", 4);
-    int chunk_size = 36 + num_samples * 4;
-    file.write(reinterpret_cast<const char*>(&chunk_size), 4);
+    file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
     file.write("WAVE", 4);
 
-    // Write fmt Chunk
+    // 2. Write fmt Chunk (PCM IEEE Float = format 3, Mono = 1 channel, 32-bit)
     file.write("fmt ", 4);
-    int subchunk1_size = 16;
-    file.write(reinterpret_cast<const char*>(&subchunk1_size), 4);
-    short audio_format = 3; // 3 = IEEE Float
+    uint32_t fmt_chunk_size = 16;
+    file.write(reinterpret_cast<const char*>(&fmt_chunk_size), 4);
+    
+    uint16_t audio_format = 3; // IEEE float
+    uint16_t num_channels = 1; // Single channel
+    uint32_t byte_rate = sample_rate * num_channels * sizeof(float);
+    uint16_t block_align = num_channels * sizeof(float);
+    uint16_t bits_per_sample = 32;
+
     file.write(reinterpret_cast<const char*>(&audio_format), 2);
-    short num_channels = 1;
     file.write(reinterpret_cast<const char*>(&num_channels), 2);
     file.write(reinterpret_cast<const char*>(&sample_rate), 4);
     file.write(reinterpret_cast<const char*>(&byte_rate), 4);
-    short block_align = 4;
     file.write(reinterpret_cast<const char*>(&block_align), 2);
-    short bits_per_sample = 32;
     file.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
 
-    // Write data Chunk
+    // 3. Write data Chunk
     file.write("data", 4);
-    int subchunk2_size = num_samples * 4;
-    file.write(reinterpret_cast<const char*>(&subchunk2_size), 4);
-    file.write(reinterpret_cast<const char*>(data.data()), subchunk2_size);
+    file.write(reinterpret_cast<const char*>(&data_bytes), 4);
+    if (num_samples > 0) {
+        file.write(reinterpret_cast<const char*>(data.data()), data_bytes);
+    }
 
-    std::cout << " Saved: " << full_name << " (Format: Mono, 32-bit Float)" << std::endl;
+    // 4. Write Custom "xDAT" Chunk
+    file.write("xDAT", 4);
+    file.write(reinterpret_cast<const char*>(&xdat_payload_size), 4);
+
+    // Helper lambda to write a 4-byte tag followed by its 4-byte value
+    auto write_field = [&](const char tag[4], float val) {
+        file.write(tag, 4);
+        file.write(reinterpret_cast<const char*>(&val), sizeof(float));
+    };
+
+    auto write_field_u32 = [&](const char tag[4], uint32_t val) {
+        file.write(tag, 4);
+        file.write(reinterpret_cast<const char*>(&val), sizeof(uint32_t));
+    };
+
+    // Write parameters in the requested mapping
+    write_field("f0sw", args.start_freq);
+    write_field("f1sw", args.end_freq);
+    write_field("fhfw", args.HF_window_startF);
+    write_field("rchr", args.chirp_rate);
+    write_field("levl", args.level);
+    write_field_u32("date", args.timestamp);
+    write_field_u32("reps", static_cast<uint32_t>(args.repetitions));
+
+    file.close();
+    return file.good();
 }
+
 
 
 // Hardware Device Management
@@ -429,23 +562,24 @@ bool check_host_api_and_device(AppArgs& args) {
 }
 
 
-// Stimulus Generation including windowing, padding, and gain
-std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float start_freq, float room_decay_time, float level_dB) {
-    // Promote core calculation variables to double precision
-    double d_sample_rate = static_cast<double>(sample_rate);
-    double d_start_freq  = static_cast<double>(start_freq);
-    double d_chirp_rate  = static_cast<double>(chirp_rate);
-    double d_level_dB    = static_cast<double>(level_dB);
 
-    double nyquist = 0.5 * d_sample_rate;
-    double end_freq = 0.99 * nyquist; // End at 99% of Nyquist frequency
+
+// Log Chirp Generation including windowing, padding, and gain
+std::vector<float> generate_log_chirp(const AppArgs& args) {
+    // Promote core calculation variables to double precision from AppArgs
+    double d_sample_rate = static_cast<double>(args.sample_rate);
+    double d_start_freq  = static_cast<double>(args.start_freq);
+    double d_end_freq    = static_cast<double>(args.end_freq);
+    double d_chirp_rate  = static_cast<double>(args.chirp_rate);
+    double d_level_dB    = static_cast<double>(args.level);
+    double room_decay_time = static_cast<double>(args.rt60);
 
     // Basic input validation
-    if (d_start_freq <= 0.0 || end_freq <= d_start_freq || d_chirp_rate <= 0.0 || sample_rate <= 0) {
+    if (d_start_freq <= 0.0 || d_end_freq <= d_start_freq || d_chirp_rate <= 0.0 || args.sample_rate <= 0) {
         throw std::invalid_argument("Invalid parameters for chirp generation.");
     }
 
-    double total_decades = std::log10(end_freq / d_start_freq);
+    double total_decades = std::log10(d_end_freq / d_start_freq);
     double duration = d_chirp_rate * total_decades;
     int num_samples = static_cast<int>(d_sample_rate * duration);
 
@@ -453,13 +587,12 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
     // Convert decibels to a linear amplitude multiplier in double precision
     // amplitude must be 1.0 or less.
-    double amplitude = std::min( 1.0, std::pow(10.0, d_level_dB / 20.0) );
-
+    double amplitude = std::min(1.0, std::pow(10.0, d_level_dB / 20.0));
 
     // Precompute constant terms in double precision outside the loop
-    const double ln_ratio = std::log(end_freq / d_start_freq);
+    const double ln_ratio = std::log(d_end_freq / d_start_freq);
     const double phase_factor = d_start_freq * duration / ln_ratio;
-    const double ratio = end_freq / d_start_freq;
+    const double ratio = d_end_freq / d_start_freq;
     const double two_pi = 2.0 * M_PI;
 
     // Generate Logarithmic Chirp in Double Precision & Cast to Float
@@ -475,7 +608,7 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     // Calculate taper for low frequency (start) end of chirp:
     //   Define taper width in decades of frequency; 0.3 ~ one octave
     const float width_in_decades = 0.3f;  
-    int start_length = static_cast<int>(sample_rate * (duration * (width_in_decades / total_decades)));    
+    int start_length = static_cast<int>(args.sample_rate * (duration * (width_in_decades / total_decades)));    
     // Taper width for high frequency end of chirp is fixed at 220 samples. 
     //   This corresponds to 5 ms at a 44.1 kHz sample rate. 
     int end_length = 220;
@@ -483,15 +616,15 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
     // Apply Tapers:
     for (int i = 0; i < start_length; ++i) {
         double hann = 0.5 * (1.0 - std::cos(M_PI * static_cast<double>(i) / start_length));
-        stimulus[i] *= hann;
+        stimulus[i] *= static_cast<float>(hann);
     }
     for (int i = 0; i < end_length; ++i) {
         double hann = 0.5 * (1.0 - std::cos(M_PI * static_cast<double>(i) / end_length));
-        stimulus[num_samples - end_length + i] *= (1.0 - hann);
+        stimulus[num_samples - end_length + i] *= static_cast<float>(1.0 - hann);
     }
 
     // Add zero padding at the end equal to the room_decay_time + 0.5 sec
-    int end_pad_samples = static_cast<int>(sample_rate * (0.5 + room_decay_time) );
+    int end_pad_samples = static_cast<int>(args.sample_rate * (0.5 + room_decay_time));
     stimulus.insert(stimulus.end(), end_pad_samples, 0.0f);
 
     return stimulus;
@@ -499,41 +632,34 @@ std::vector<float> generate_stimulus(int sample_rate, float chirp_rate, float st
 
 
 
-/**
- * Generates the analytical Farina inverse filter with an integrated 2.5% 
- * high-frequency fade-out taper to suppress Nyquist mathematical edge ringing.
- *
- * @param sample_rate  The system sampling rate in Hz (e.g., 44100, 48000).
- * @param chirp_rate   The sweep rate parameter (seconds per decade).
- * @param start_freq   The starting frequency of the exponential sweep in Hz.
- * @param fade_ratio   The array percentage dedicated to the taper (default 0.025 = 2.5%).
- */
-std::vector<float> generate_inverse_filter(int sample_rate, float chirp_rate, float start_freq, float fade_ratio = 0.025f) {
-    // Promote core variables to double precision
-    double d_sample_rate = static_cast<double>(sample_rate);
-    double d_start_freq  = static_cast<double>(start_freq);
-    double d_chirp_rate  = static_cast<double>(chirp_rate);
 
-    // 99% of Nyquist frequency
-    double end_freq = 0.99 * 0.5 * d_sample_rate; 
+// Generate the analytical Farina inverse filter with an integrated high-
+//    frequency fade-out taper to suppress ringing near the Nyquist frequency
 
-    if (d_start_freq <= 0.0 || end_freq <= d_start_freq || d_chirp_rate <= 0.0 || sample_rate <= 0) {
+std::vector<float> generate_Farina_inverse_filter(const AppArgs& args) {
+    // Promote core variables to double precision from AppArgs
+    double d_sample_rate = static_cast<double>(args.sample_rate);
+    double d_start_freq  = static_cast<double>(args.start_freq);
+    double d_end_freq    = static_cast<double>(args.end_freq);
+    double d_hf_window_startF = static_cast<double>(args.HF_window_startF);
+    double d_chirp_rate  = static_cast<double>(args.chirp_rate);
+
+    if (d_start_freq <= 0.0 || d_end_freq <= d_start_freq || 
+        d_hf_window_startF < d_start_freq || d_hf_window_startF > d_end_freq || 
+        d_chirp_rate <= 0.0 || args.sample_rate <= 0) {
         throw std::invalid_argument("Invalid parameters for inverse filter generation.");
     }
-    if (fade_ratio < 0.0f || fade_ratio > 0.20f) {
-        throw std::invalid_argument("Fade ratio should typically be between 0.0 (0%) and 0.20 (20%).");
-    }
 
-    double total_decades = std::log10(end_freq / d_start_freq);
+    double total_decades = std::log10(d_end_freq / d_start_freq);
     double duration = d_chirp_rate * total_decades;
     int num_samples = static_cast<int>(d_sample_rate * duration);
 
     std::vector<double> ideal_sweep(num_samples);
     std::vector<float> final_inv_filter(num_samples);
 
-    const double ln_ratio = std::log(end_freq / d_start_freq);
+    const double ln_ratio = std::log(d_end_freq / d_start_freq);
     const double phase_factor = d_start_freq * duration / ln_ratio;
-    const double ratio = end_freq / d_start_freq;
+    const double ratio = d_end_freq / d_start_freq;
     const double two_pi = 2.0 * M_PI;
 
     // 1. Generate the ideal forward exponential sweep stimulus
@@ -552,20 +678,23 @@ std::vector<float> generate_inverse_filter(int sample_rate, float chirp_rate, fl
         double t = static_cast<double>(i) / d_sample_rate;
         int rev_idx = num_samples - 1 - i;
         
-        // FIXED: Using (duration - t) ensures maximum gain is applied at index 0 (high frequencies)
         double modulation = std::exp((duration - t) / sweep_rate_L) * normalization_scaler;
         final_inv_filter[i] = static_cast<float>(ideal_sweep[rev_idx] * modulation);
     }
 
-
-    // 4. Apply High-Frequency Fade-Out Window (2.5% Taper)
+    // 4. Apply High-Frequency Fade-Out Window between HF_window_startF and end_freq
     // Because the inverse filter is time-reversed, the maximum frequency (end_freq) 
     // happens at index i = 0. Fading out high frequencies means fading IN at index 0.
-    int fade_samples = static_cast<int>(num_samples * fade_ratio);
+    double fade_duration = sweep_rate_L * std::log(d_end_freq / d_hf_window_startF);
+    int fade_samples = static_cast<int>(d_sample_rate * fade_duration);
+    if (fade_samples > num_samples) {
+        fade_samples = num_samples;
+    }
+
     for (int i = 0; i < fade_samples; ++i) {
         // Taper using a raised cosine (half-Hann window) from 0.0 to 1.0
         double angle = (static_cast<double>(i) / fade_samples) * (M_PI / 2.0);
-        double taper = std::sin(angle); // smooth curve from sin(0)=0 to sin(pi/2)=1
+        double taper = std::sin(angle);
         
         final_inv_filter[i] *= static_cast<float>(taper);
     }
@@ -631,66 +760,205 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 }
 
 
-std::pair<std::vector<float>, std::vector<float>> align_and_average(
-    const std::vector<std::vector<float>>& ref_history, 
-    const std::vector<std::vector<float>>& mic_history,
+
+DataContainer perform_QA_and_time_alignment(
+    const DataContainer& raw_data,
     float sample_rate,
     float alignment_window_msec) 
 {
-    size_t num_runs = ref_history.size();
-    if (num_runs == 0) return {};
-    size_t signal_size = ref_history[0].size();
+    const auto& ref_history = raw_data.stimulus_data;
+    const auto& mic_history = raw_data.measurement_data;
     
-    std::vector<std::vector<float>> aligned_ref = {ref_history[0]};
-    std::vector<std::vector<float>> aligned_mic = {mic_history[0]};
-
+    size_t num_runs = mic_history.size();
+    if (num_runs == 0 || ref_history.size() != num_runs) return {};
+    size_t signal_size = mic_history[0].size();
+    
     // Convert time window to number of samples based on sample rate
     int max_lag = static_cast<int>(std::round((alignment_window_msec / 1000.0f) * sample_rate));
 
+    // Determine efficient FFT size for linear cross-correlation (next power of 2 >= 2*N - 1)
+    size_t fft_size = 1;
+    size_t min_fft_size = 2 * signal_size - 1;
+    while (fft_size < min_fft_size) {
+        fft_size *= 2;
+    }
+    size_t num_freq_bins = fft_size / 2 + 1;
+    float fft_norm = 1.0f / static_cast<float>(fft_size);
+
+    pocketfft::shape_t shape_fwd = { fft_size };
+    pocketfft::stride_t stride_in_fwd = { sizeof(float) };
+    pocketfft::stride_t stride_out_fwd = { sizeof(std::complex<float>) };
+    pocketfft::shape_t axes = { 0 };
+
+    pocketfft::shape_t shape_bwd = { fft_size };
+    pocketfft::stride_t stride_in_bwd = { sizeof(std::complex<float>) };
+    pocketfft::stride_t stride_out_bwd = { sizeof(float) };
+
+    // --- AUTOMATIC CONSENSUS ANCHOR SELECTION (Based on Measurement Data) ---
+    size_t best_anchor_idx = 0;
     if (num_runs > 1) {
-        std::cout << "\n--- Performing Measurement Alignment & Quality Control ---\n";
-        std::cout << "Searching within a window of +/- " << alignment_window_msec 
-            << " ms (" << max_lag << " samples at " << sample_rate 
-            << " Hz) for the best correlation with RUN 1 data:\n\n";
+        std::cout << "\n--- Evaluating Measurement Consistency & Selecting Consensus Anchor ---\n";
+        
+        std::vector<float> anchor_scores(num_runs, 0.0f);
+
+        // Precompute FFTs and energy prefix sums for all measurement runs
+        std::vector<std::vector<std::complex<float>>> all_MIC_f(num_runs, std::vector<std::complex<float>>(num_freq_bins));
+        std::vector<std::vector<float>> all_pref_2(num_runs, std::vector<float>(signal_size + 1, 0.0f));
+
+        for (size_t i = 0; i < num_runs; ++i) {
+            std::vector<float> mic_padded(fft_size, 0.0f);
+            for (size_t n = 0; n < signal_size; ++n) {
+                float val = mic_history[i][n];
+                mic_padded[n] = val;
+                all_pref_2[i][n + 1] = all_pref_2[i][n] + val * val;
+            }
+            pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD,
+                           mic_padded.data(), all_MIC_f[i].data(), fft_norm);
+        }
+
+        auto get_energy = [&](size_t run_idx, int start, int end) {
+            if (start > end) return 0.0f;
+            return all_pref_2[run_idx][end + 1] - all_pref_2[run_idx][start];
+        };
+
+        // Score each run based on its average correlation agreement with all other measurement runs
+        for (size_t i = 0; i < num_runs; ++i) {
+            float total_agreement = 0.0f;
+            for (size_t j = 0; j < num_runs; ++j) {
+                if (i == j) continue;
+
+                // Cross-spectrum between measurement run i and run j
+                std::vector<std::complex<float>> Z_f(num_freq_bins);
+                for (size_t f = 0; f < num_freq_bins; ++f) {
+                    Z_f[f] = std::conj(all_MIC_f[i][f]) * all_MIC_f[j][f] * fft_norm;
+                }
+
+                std::vector<float> xcorr(fft_size);
+                pocketfft::c2r(shape_bwd, stride_in_bwd, stride_out_bwd, axes, pocketfft::BACKWARD,
+                               Z_f.data(), xcorr.data(), 1.0f);
+
+                // Find peak NCC within max_lag for this pair
+                float max_pair_ncc = -1.0f;
+                for (int lag = -max_lag; lag <= max_lag; ++lag) {
+                    size_t xcorr_idx = (lag >= 0) ? static_cast<size_t>(lag) : static_cast<size_t>(fft_size + lag);
+                    float current_dot = xcorr[xcorr_idx];
+
+                    int n_start = std::max(0, -lag);
+                    int n_end = std::min(static_cast<int>(signal_size - 1), static_cast<int>(signal_size - 1 - lag));
+
+                    float energy_i = get_energy(i, n_start, n_end);
+                    float energy_j = get_energy(j, n_start + lag, n_end + lag);
+
+                    float denom = std::sqrt(energy_i * energy_j);
+                    float ncc = (denom > 1e-5f) ? (current_dot / denom) : 0.0f;
+                    if (ncc > max_pair_ncc) max_pair_ncc = ncc;
+                }
+                total_agreement += max_pair_ncc;
+            }
+            anchor_scores[i] = total_agreement / static_cast<float>(num_runs - 1);
+        }
+
+        // Select the measurement run with the highest average agreement score as our robust anchor
+        auto max_it = std::max_element(anchor_scores.begin(), anchor_scores.end());
+        best_anchor_idx = std::distance(anchor_scores.begin(), max_it);
+        
+        std::cout << "  --> Selected MEASUREMENT RUN " << best_anchor_idx + 1 
+                  << " as the consensus reference anchor (Avg Agreement Score: " << *max_it << ").\n\n";
     }
 
-    // Quality & Outlier Rejection Checks (CC Threshold set to 0.95)
+    // --- ALIGNMENT & QUALITY CONTROL PHASE ---
+    DataContainer output;
+    output.stimulus_data.reserve(num_runs);
+    output.measurement_data.reserve(num_runs);
+
+    // The winning consensus run is always accepted first as our baseline
+    output.stimulus_data.push_back(ref_history[best_anchor_idx]);
+    output.measurement_data.push_back(mic_history[best_anchor_idx]);
+
+    if (num_runs > 1) {
+        std::cout << "--- Performing FFT-Optimized Alignment & Quality Control ---\n";
+        std::cout << "Searching within a window of +/- " << alignment_window_msec 
+            << " ms (" << max_lag << " samples at " << sample_rate 
+            << " Hz) for the best correlation with MEASUREMENT RUN " << best_anchor_idx + 1 << ":\n\n";
+    }
+
     static constexpr float min_ncc_threshold = 0.95f;
-    int lag_threshold;
-    lag_threshold = static_cast<int>(0.95f * max_lag);
-    
+    int lag_threshold = static_cast<int>(0.95f * max_lag);
 
-    std::vector<float> shifted_ref;
-    std::vector<float> shifted_mic;
+    // Precompute forward FFT and energy prefix sums for the chosen anchor's measurement data
+    std::vector<float> anchor_mic_padded(fft_size, 0.0f);
+    for (size_t n = 0; n < signal_size; ++n) {
+        anchor_mic_padded[n] = mic_history[best_anchor_idx][n];
+    }
+    std::vector<std::complex<float>> MIC_anchor_f(num_freq_bins);
+    pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD,
+                   anchor_mic_padded.data(), MIC_anchor_f.data(), fft_norm);
 
-    for (size_t i = 1; i < num_runs; ++i) {
-        float max_corr = -1e20f;
-        int best_lag = 0;
+    std::vector<float> pref_anchor_2(signal_size + 1, 0.0f);
+    for (size_t n = 0; n < signal_size; ++n) {
+        float val = mic_history[best_anchor_idx][n];
+        pref_anchor_2[n + 1] = pref_anchor_2[n] + val * val;
+    }
+    auto get_anchor_energy = [&](int start, int end) {
+        if (start > end) return 0.0f;
+        return pref_anchor_2[end + 1] - pref_anchor_2[start];
+    };
+
+    // Loop through all other runs and align/filter them against the robust measurement anchor
+    for (size_t i = 0; i < num_runs; ++i) {
+        if (i == best_anchor_idx) continue; // Skip the anchor itself since it's already added
+
+        // Precompute prefix sums for Run i measurement energy (y^2)
+        std::vector<float> pref_mic_i_2(signal_size + 1, 0.0f);
+        for (size_t n = 0; n < signal_size; ++n) {
+            float val = mic_history[i][n];
+            pref_mic_i_2[n + 1] = pref_mic_i_2[n] + val * val;
+        }
+        auto get_mic_i_energy = [&](int start, int end) {
+            if (start > end) return 0.0f;
+            return pref_mic_i_2[end + 1] - pref_mic_i_2[start];
+        };
+
+        // Prepare and forward FFT padded Run i measurement signal
+        std::vector<float> mic_i_padded(fft_size, 0.0f);
+        for (size_t n = 0; n < signal_size; ++n) {
+            mic_i_padded[n] = mic_history[i][n];
+        }
+        std::vector<std::complex<float>> MIC_I_f(num_freq_bins);
+        pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD,
+                       mic_i_padded.data(), MIC_I_f.data(), 1.0f);
+
+        // Multiply cross-spectrum in frequency domain: conj(MIC_anchor) * MIC_I
+        std::vector<std::complex<float>> Z_f(num_freq_bins);
+        for (size_t f = 0; f < num_freq_bins; ++f) {
+            Z_f[f] = std::conj(MIC_anchor_f[f]) * MIC_I_f[f] * fft_norm;
+        }
+
+        // Inverse FFT to get full cross-correlation array
+        std::vector<float> xcorr(fft_size);
+        pocketfft::c2r(shape_bwd, stride_in_bwd, stride_out_bwd, axes, pocketfft::BACKWARD,
+                       Z_f.data(), xcorr.data(), 1.0f);
 
         int range_size = 2 * max_lag + 1;
         std::vector<float> corr_scores(range_size, -1e20f);
+        float max_corr = -1e20f;
+        int best_lag = 0;
 
-        // Find best integer lag using normalized cross-correlation
         for (int lag = -max_lag; lag <= max_lag; ++lag) {
-            float current_dot = 0.0f;
-            float ref0_energy = 0.0f;
-            float ref_i_energy = 0.0f;
+            size_t xcorr_idx = (lag >= 0) ? static_cast<size_t>(lag) : static_cast<size_t>(fft_size + lag);
+            float current_dot = xcorr[xcorr_idx];
 
-            for (size_t n = 0; n < signal_size; ++n) {
-                long long ref_idx = static_cast<long long>(n) + lag;
-                if (ref_idx >= 0 && ref_idx < static_cast<long long>(signal_size)) {
-                    float val0 = ref_history[0][n];
-                    float vali = ref_history[i][ref_idx];
-                    current_dot += val0 * vali;
-                    ref0_energy += val0 * val0;
-                    ref_i_energy += vali * vali;
-                }
-            }
+            int n_start = std::max(0, -lag);
+            int n_end = std::min(static_cast<int>(signal_size - 1), static_cast<int>(signal_size - 1 - lag));
 
-            float denominator = std::sqrt(ref0_energy * ref_i_energy);
+            float anchor_energy = get_anchor_energy(n_start, n_end);
+            float mic_i_energy = get_mic_i_energy(n_start + lag, n_end + lag);
+
+            float denominator = std::sqrt(anchor_energy * mic_i_energy);
             float ncc = (denominator > 1e-5f) ? (current_dot / denominator) : 0.0f;
 
-            corr_scores[lag + max_lag] = ncc;
+            int score_idx = lag + max_lag;
+            corr_scores[score_idx] = ncc;
 
             if (ncc > max_corr) {
                 max_corr = ncc;
@@ -715,52 +983,39 @@ std::pair<std::vector<float>, std::vector<float>> align_and_average(
         }
 
         std::cout << "RUN " << i + 1 << " has a timing offset of " << refined_lag 
-                  << " samples and a quality score of " << max_corr << ").\n";
+                  << " samples and a quality score of " << max_corr << ".\n";
         
+        std::vector<float> shifted_ref;
+        std::vector<float> shifted_mic;
+
         if (std::abs(refined_lag) > lag_threshold) {
-            std::cout << "  --> The timing error exceeded " << alignment_window_msec << " ms. RUN REJECTED.\n";
+            std::cout << "  --> The timing error exceeded the threshold. RUN REJECTED.\n";
             continue;
         } 
         else if (max_corr < min_ncc_threshold) {
-            std::cout << "  --> The quality score is below the cutoff of (" 
+            std::cout << "  --> The quality score is below the cutoff (" 
                       << min_ncc_threshold << "). RUN REJECTED (likely corrupted).\n";
             continue;
         } 
         else if (std::abs(refined_lag) < 0.2f) {
-            std::cout << "  --> RUN ACCEPTED for averaging. \n";
+            std::cout << "  --> RUN ACCEPTED for further processing.\n";
             shifted_ref = ref_history[i];
             shifted_mic = mic_history[i];
         } 
         else {
-            std::cout << "  --> Correcting the timing error for this run. RUN ACCEPTED for averaging. \n";
+            std::cout << "  --> Correcting the timing error for this run. RUN ACCEPTED for further processing.\n";
+            // Apply the correction derived from the measurement data to BOTH streams
             shifted_ref = fractional_delay_filter(ref_history[i], -refined_lag);
             shifted_mic = fractional_delay_filter(mic_history[i], -refined_lag);
         }
 
-        aligned_ref.push_back(shifted_ref);
-        aligned_mic.push_back(shifted_mic);
+        output.stimulus_data.push_back(shifted_ref);
+        output.measurement_data.push_back(shifted_mic);
     }
 
-    // Compute average using all valid runs
-    if ( ref_history.size() > 1 ) {
-        std::cout << "\nPerforming Time-Synchronous Measurement Averaging, using " 
-            << num_runs << " out of " << ref_history.size() 
-            << " measurement runs.\n";
-    }
-    num_runs = aligned_ref.size();
-    std::vector<float> avg_ref(signal_size, 0.0f);
-    std::vector<float> avg_mic(signal_size, 0.0f);
-    for (size_t n = 0; n < signal_size; ++n) {
-        for (size_t i = 0; i < num_runs; ++i) {
-            avg_ref[n] += aligned_ref[i][n];
-            avg_mic[n] += aligned_mic[i][n];
-        }
-        avg_ref[n] /= static_cast<float>(num_runs);
-        avg_mic[n] /= static_cast<float>(num_runs);
-    }
-
-    return {avg_ref, avg_mic};
+    return output;
 }
+
 
 
 // Context structure to manage state inside the PortAudio callback
@@ -993,14 +1248,7 @@ static int measurementCallback(const void* inputBuffer, void* outputBuffer,
 }
 
 
-struct MeasurementResult {
-    std::vector<float> averaged_reference;
-    std::vector<float> averaged_microphone;
-    bool success = false;
-};
-
-
-MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<float>& stimulus) {
+DataContainer perform_acoustic_measurement(AppArgs& args, const std::vector<float>& stimulus) {
     int total_samples = stimulus.size();
     
     const PaDeviceInfo* inputDevInfo = Pa_GetDeviceInfo(args.input_device_idx);
@@ -1098,25 +1346,22 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
         Pa_Sleep(20);
     }
 
-    //Search within a maximum expected hardware latency of 300msec given in samples
     const int max_expected_latency = static_cast<int>( 0.3f * args.sample_rate );
-
-    // Calculate baseline hardware delay using the probe loopback reference
     int baseline_delay_samples = estimate_baseline_delay(probe_ref_record, pure_probe, max_expected_latency);
 
     std::cout << "    An I/O Delay of " 
         << 1000.0f * baseline_delay_samples / args.sample_rate 
         << " milliseconds (" << baseline_delay_samples << " samples) was found.\n\n";
+    
     std::random_device rd;
     std::mt19937 gen(rd());
 
     // Measurement Repetition Loop with Inter-measurement Pauses
     std::cout << "Begin Collecting Data:\n\n";
-    float max_variation = args.mean_wait * 0.10f; //compute variation in wait time
+    float max_variation = args.mean_wait * 0.10f;
     float actual_wait;
 
     for (int r = 0; r < args.repetitions; ++r) {
-        //Pause
         std::uniform_real_distribution<float> dis(-max_variation, max_variation);
         actual_wait = args.mean_wait + dis(gen);
         std::cout << "Pausing " << actual_wait << " seconds before collecting data.\n";
@@ -1127,7 +1372,6 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
             Pa_Sleep(20);
         }
 
-        //The pause has completed, so perform measurement
         std::cout << "Begin measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
         ctx.current_rep = r;
         ctx.current_frame = 0;
@@ -1140,21 +1384,158 @@ MeasurementResult perform_acoustic_measurement(AppArgs& args, const std::vector<
     Pa_StopStream(stream);
     Pa_CloseStream(stream);
 
-    // Alignment, Quality Filtering, and Averaging of Data
-    auto [avg_ref, avg_mic] = align_and_average(
-        ref_history, 
-        mic_history, 
-        args.sample_rate,
-        args.alignment_window
-    );
+    // Return the raw histories wrapped inside DataContainer
+    return {ref_history, mic_history};
+}
 
-    if (avg_ref.empty() || avg_mic.empty()) {
-        std::cerr << "Error: Alignment and averaging failed (all runs rejected).\n";
-        return {};
+
+
+// Computes a single noise-reduced averaged reference signal from all valid aligned runs.
+std::vector<float> compute_averaged_stimulus(const DataContainer& alignment_data)
+{
+    const auto& ref_history = alignment_data.stimulus_data;
+    size_t num_runs = ref_history.size();
+    if (num_runs == 0) return {};
+
+    size_t signal_size = ref_history[0].size();
+    std::vector<float> averaged_ref(signal_size, 0.0f);
+
+    // Sum all aligned reference runs
+    for (size_t i = 0; i < num_runs; ++i) {
+        for (size_t n = 0; n < signal_size; ++n) {
+            averaged_ref[n] += ref_history[i][n];
+        }
     }
 
-    return {avg_ref, avg_mic, true};
+    // Divide by the number of valid runs to complete the average
+    float inv_num_runs = 1.0f / static_cast<float>(num_runs);
+    for (size_t n = 0; n < signal_size; ++n) {
+        averaged_ref[n] *= inv_num_runs;
+    }
+
+    return averaged_ref;
 }
+
+
+
+
+// Computes a single noise-reduced averaged microphone signal from all valid aligned runs.
+std::vector<float> compute_averaged_measurement(const DataContainer& alignment_data)
+{
+    const auto& mic_history = alignment_data.measurement_data;
+    size_t num_runs = mic_history.size();
+    if (num_runs == 0) return {};
+
+    size_t signal_size = mic_history[0].size();
+    std::vector<float> averaged_mic(signal_size, 0.0f);
+
+    // Sum all aligned microphone runs
+    for (size_t i = 0; i < num_runs; ++i) {
+        for (size_t n = 0; n < signal_size; ++n) {
+            averaged_mic[n] += mic_history[i][n];
+        }
+    }
+
+    // Divide by the number of valid runs to complete the average
+    float inv_num_runs = 1.0f / static_cast<float>(num_runs);
+    for (size_t n = 0; n < signal_size; ++n) {
+        averaged_mic[n] *= inv_num_runs;
+    }
+
+    return averaged_mic;
+}
+
+
+
+
+
+// Computes the time-domain impulse response using the true H1 estimator
+// across multiple pre-aligned, un-averaged measurement datasets.
+std::vector<float> compute_true_h1_time_domain(const DataContainer& alignment_data)
+{
+    // Total number of measurement repetitions/trials
+    size_t num_trials = alignment_data.stimulus_data.size();
+    if (num_trials == 0) return {};
+
+    // Length of a single time block
+    size_t signal_length = alignment_data.stimulus_data[0].size();
+    
+    // For real-input FFTs, number of unique positive frequency bins is (N / 2) + 1
+    size_t num_freq_bins = (signal_length / 2) + 1;
+
+    // Allocate accumulation buffers for ensemble averaging
+    std::vector<float> G_xx_sum(num_freq_bins, 0.0f);
+    std::vector<std::complex<float>> G_xy_sum(num_freq_bins, 0.0f);
+
+    // PocketFFT configurations for Real-to-Complex (r2c) forward transform
+    pocketfft::shape_t shape_fwd = { signal_length };
+    pocketfft::stride_t stride_in_fwd = { sizeof(float) };
+    pocketfft::stride_t stride_out_fwd = { sizeof(std::complex<float>) };
+    pocketfft::shape_t axes = { 0 };
+
+    // Intermediate frequency buffers utilized inside the loop
+    std::vector<std::complex<float>> REF_f(num_freq_bins);
+    std::vector<std::complex<float>> MIC_f(num_freq_bins);
+
+    // Scale factor to normalize forward PocketFFT values (1 / N)
+    float fft_norm = 1.0f / static_cast<float>(signal_length);
+
+    // 1. Core H1 Phase: Cross-correlate each trial BEFORE averaging
+    for (size_t i = 0; i < num_trials; ++i) {
+        // PocketFFT requires non-const vectors for its internal memory layout
+        std::vector<float> ref_trial = alignment_data.stimulus_data[i];
+        std::vector<float> mic_trial = alignment_data.measurement_data[i];
+
+        // Execute Real-to-Complex Forward FFT for reference stimulus
+        pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD, 
+                       ref_trial.data(), REF_f.data(), fft_norm);
+
+        // Execute Real-to-Complex Forward FFT for microphone response
+        pocketfft::r2c(shape_fwd, stride_in_fwd, stride_out_fwd, axes, pocketfft::FORWARD, 
+                       mic_trial.data(), MIC_f.data(), fft_norm);
+
+        // Compute and accumulate auto- and cross-spectral densities
+        for (size_t f = 0; f < num_freq_bins; ++f) {
+            std::complex<float> REF_conj = std::conj(REF_f[f]);
+            
+            // Gxx = REF* * REF (Auto-spectrum, purely real energy)
+            G_xx_sum[f] += std::real(REF_conj * REF_f[f]); 
+            
+            // Gxy = REF* * MIC (Cross-spectrum)
+            // Uncorrelated background noise phase vectors point in random directions 
+            // across trials and systematically cancel out inside this accumulator.
+            G_xy_sum[f] += REF_conj * MIC_f[f];            
+        }
+    }
+
+    // 2. Compute the final frequency-domain H1 matrix division
+    // (Note: dividing both sums by num_trials cancels out mathematically, so we omit for performance)
+    std::vector<std::complex<float>> H1_f(num_freq_bins);
+    for (size_t f = 0; f < num_freq_bins; ++f) {
+        float Gxx = G_xx_sum[f];
+        std::complex<float> Gxy = G_xy_sum[f];
+
+        // Guard against division-by-zero noise amplification in unexcited frequencies
+        if (Gxx > 1e-15f) {
+            H1_f[f] = Gxy / Gxx;
+        } else {
+            H1_f[f] = std::complex<float>(0.0f, 0.0f);
+        }
+    }
+
+    // 3. Inverse FFT (Complex-to-Real) to generate the clean Time-Domain Impulse Response
+    std::vector<float> impulse_response(signal_length);
+    pocketfft::shape_t shape_bwd = { signal_length };
+    pocketfft::stride_t stride_in_bwd = { sizeof(std::complex<float>) };
+    pocketfft::stride_t stride_out_bwd = { sizeof(float) };
+
+    pocketfft::c2r(shape_bwd, stride_in_bwd, stride_out_bwd, axes, pocketfft::BACKWARD, 
+                   H1_f.data(), impulse_response.data(), 1.0f);
+
+    return impulse_response;
+}
+
+
 
 
 
@@ -1168,6 +1549,9 @@ int main(int argc, char* argv[]) {
 
     AppArgs args = parse_arguments(argc, argv);
 
+    //sanitize the basefilename
+    args.basefilename = sanitizeFilename(args.basefilename, "results");
+
     // Print all program parameters to the screen
     args.print();
 
@@ -1175,44 +1559,84 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // Generate the stimulus
-    std::vector<float> stimulus = generate_stimulus(
+    // Generate a chirp to be played as the system stimulus
+    std::vector<float> chirp = generate_log_chirp(args); 
+
+    // Collect raw measurement data from hardware
+    DataContainer raw_data = perform_acoustic_measurement(args, chirp);
+    if (raw_data.stimulus_data.empty()) {
+        std::cerr << "Error: Acoustic measurement session failed.\n";
+        return -1;
+    }
+
+    // Perform time-alignment, consensus anchor selection, and quality control
+    DataContainer aligned_data = perform_QA_and_time_alignment(
+        raw_data, 
         args.sample_rate, 
-        args.chirp_rate, 
-        args.start_freq,
-        args.rt60, 
-        args.level
+        args.alignment_window
     );
 
-    // perform_acoustic_measurement and return data
-    auto [final_avg_ref, final_avg_mic, success] = perform_acoustic_measurement(
-        args, 
-        stimulus
-    );
-    
-    // Check in case of failure
-    if (! success) {
-        std::cerr << "Measurement session failed.\n";
-        return 1;
+    if (aligned_data.stimulus_data.empty()) {
+        std::cerr << "Error: Time alignment and quality control failed (all runs rejected).\n";
+        return -1;
+    } else {
+        std::cout << "\n" << aligned_data.stimulus_data.size() 
+                  << " out of " << raw_data.stimulus_data.size() << " reps will now be averaged.\n";
     }
+
+    // Average the stimulus and measurement data
+    std::vector<float> averaged_ref = compute_averaged_stimulus(aligned_data);
+    std::vector<float> averaged_mic = compute_averaged_measurement(aligned_data);
+
+    // Compute time domain impulse response using H1 estimator 
+    std::vector<float> h1_ir = compute_true_h1_time_domain(aligned_data);
+
+    // Generate and store a timestamp
+    args.timestamp = get_current_timestamp_32();
 
     std::cout << "\n--- Saving Data Files ---\n";
-    //Write microphone data as WAV file
-    write_float32_wav(args.mic_output_file, final_avg_mic, args.sample_rate);
+    std::string filetype;
+    std::string filename;
 
-    //If the stimulus filename was supplied, write stimulus data as WAV file
-    if (!args.stimulus_output_file.empty()) {
-        write_float32_wav(args.stimulus_output_file, final_avg_ref, args.sample_rate);
+    //Write measurement data as WAV file
+    filetype = "_m";
+    filename = args.basefilename + filetype + ".wav";
+    if (write_wav_file_plus_info(args, filetype, averaged_mic)) {
+        std::cout << "Measurement data WAV file and custom xDAT metadata written to the file " << filename << "\n";
     } else {
-        std::cout << " Stimulus output file pathname omitted by user - stimulus data not saved.\n";
+        std::cerr << "Failure: An error occurred while attempting to write the measurement WAV file.\n";
+        return -1; // Optional: exit with error code
     }
 
-    // If the Farina filter filename was supplied, Generate and save the Farina Inverse Filter as WAV file
-    if (!args.farina_filter_file.empty()) {
-        std::vector<float> inv_filter = generate_inverse_filter(args.sample_rate, args.chirp_rate, args.start_freq);
-        write_float32_wav(args.farina_filter_file, inv_filter, args.sample_rate);
+    //Write stimulus data as WAV file
+    filetype = "_s";
+    filename = args.basefilename + filetype + ".wav";
+    if (write_wav_file_plus_info(args, filetype, chirp)) {
+        std::cout << "Stimulus WAV file and custom xDAT metadata written to the file " << filename << "\n";
     } else {
-        std::cout << " Farina filter file pathname omitted by user - filter not saved.\n";
+        std::cerr << "Failure: An error occurred while attempting to write the stimulus WAV file.\n";
+        return -1; // Optional: exit with error code
+    }
+
+    //Write H1 time domain response to WAV file
+    filetype = "_h1";
+    filename = args.basefilename + filetype + ".wav";
+    if (write_wav_file_plus_info(args, filetype, h1_ir)) {
+        std::cout << "Impulse response WAV file and custom xDAT metadata written to the file " << filename << "\n";
+    } else {
+        std::cerr << "Failure: An error occurred while attempting to write the impulse response WAV file.\n";
+        return -1; // Optional: exit with error code
+    }
+
+    //Generate and save the Farina Inverse Filter as WAV file
+    std::vector<float> inv_filter = generate_Farina_inverse_filter(args);
+    filetype = "_Fif";
+    filename = args.basefilename + filetype + ".wav";
+    if (write_wav_file_plus_info(args, filetype, inv_filter)) {
+        std::cout << "Farina inverse filter WAV file and custom xDAT metadata written to the file " << filename << "\n";
+    } else {
+        std::cerr << "Failure: An error occurred while attempting to write the Farina inverse filter WAV file.\n";
+        return -1; // Optional: exit with error code
     }
 
     std::cout << "\n------------ All tasks completed ------------ \n\n";
@@ -1220,3 +1644,6 @@ int main(int argc, char* argv[]) {
     Pa_Terminate();
     return 0;
 }
+
+
+

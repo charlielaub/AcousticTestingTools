@@ -6,9 +6,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Find Eigen3 (Header-only library)
-find_package(Eigen3 REQUIRED)
-
 # -------------------------------------------------------------
 # PortAudio & ASIO Discovery (Cross-Platform via vcpkg / PkgConfig)
 # -------------------------------------------------------------
@@ -31,7 +28,11 @@ endif()
 # Program 1: DaDooRunRun
 # -------------------------------------------------------------
 add_executable(DaDooRunRun measurement_tools/DaDooRunRun.cpp)
-target_link_libraries(DaDooRunRun PRIVATE Eigen3::Eigen)
+
+# Include path for PocketFFT (header-only)
+target_include_directories(DaDooRunRun PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
 if(WIN32)
     # vcpkg provides the 'portaudio' or 'portaudio_static' target
@@ -52,7 +53,6 @@ endif()
 # Program 2: ProbeAudioDevs
 # -------------------------------------------------------------
 add_executable(ProbeAudioDevs measurement_tools/ProbeAudio.cpp)
-target_link_libraries(ProbeAudioDevs PRIVATE Eigen3::Eigen)
 
 if(WIN32)
     if(TARGET portaudio::portaudio)

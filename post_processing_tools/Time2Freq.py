@@ -4,6 +4,7 @@ Description: Calculates the time domain frequency response and the harmonic
     levels using the Farina method, plus correction factors. Can produce 
     relative SPL levels, or the SPL level in units of dB re 20 uPa @ 2.83V/1m. 
     Both the regular phase and minimum phase responses are made available.
+    The H1 estimated impulse response is used to produce correct phase data.
 
 Author: Charlie Laub
 Date: October 2026
@@ -19,55 +20,49 @@ import scipy.signal
 from scipy.io import wavfile as wav
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox, RadioButtons
+import matplotlib.ticker as ticker
 from matplotlib.ticker import LogLocator
 import math
-
+import struct
+from datetime import datetime
+import tkinter as tk
+from tkinter import messagebox
 
 def parse_arguments():
     """
     Parses command-line arguments for input WAV file, base filename for outputs,
     optional microphone calibration, sensitivity parameters, and amplifier gain.
     """
-    parser = argparse.ArgumentParser(description="Process loudspeaker impulse response WAV file and export data/plots (Interactive GUI).")
-    parser.add_argument("-m","--mic_data", 
+    parser = argparse.ArgumentParser(description="An interactive program to process loudspeaker measurements collected using the program DaDooRunRun. Exports frequency domain response data and plots.")
+    parser.add_argument("-m","--measurement_datafile", 
             type=str,
             required=True,
-            help="Path to the microphone data WAV file."
+            help="Path to the WAV file containing the microphone measurement data."
     )
-    parser.add_argument("-f","--farina_filter", 
+    parser.add_argument("-i","--impulse_datafile", 
             type=str,
             required=True,
-            help="Path to the Farina inverse filter WAV file."
+            help="Path to the WAV file containing the impulse response data."
     )
-    parser.add_argument("--start_f", 
-            type=float, 
+    parser.add_argument("-f","--farina_filterfile", 
+            type=str,
             required=True,
-            help="Start frequency of stimulus sweep in Hz."
+            help="Path to the WAV file containing the Farina inverse filter."
     )
-    parser.add_argument("-o", "--output", 
+    parser.add_argument("-b", "--basename", 
             type=str, 
             default="response",
-            help="Base filename for output files (default: response)."
+            help="Base file name for output files (default: response)."
     )
-    parser.add_argument("-c","--mic_cal", 
+    parser.add_argument("-c","--mic_cal_file", 
             type=str, 
             default=None,
             help="Path to microphone calibration file (*.mic or *.cal)."
     )
-    parser.add_argument("-s","--mic_sensitivity", 
+    parser.add_argument("-k","--spl_correction_factor", 
             type=float, 
             default=None,
-            help="Microphone sensitivity in milliVolts per Pascal (mV/Pa)."
-    )
-    parser.add_argument("-v","--v_stimulus", 
-            type=float, 
-            default=2.83,
-            help="RMS Voltage reported in SPL units (default: 2.83V)."
-    )
-    parser.add_argument("-d","--distance", 
-            type=float, 
-            default=None,
-            help="Distance between mic and source in meters."
+            help="Lumped SPL correction factor."
     )
     return parser.parse_args()
 
@@ -78,16 +73,11 @@ def compute_frequency_response(
     audio_data,
     sample_rate,
     gate_end_idx,
-    tukey_alpha,
-    mic_cal_file,
-    mic_sensitivity,
-    v_stimulus,
-    distance,
+    tukey_alpha
 ):
     """
-    Applies a Tukey window, computes a standardized normalized FFT,
-    applies acoustic hardware correction factors, and returns frequencies, 
-    calibrated magnitude (dBSPL), phase vectors, and delta frequency.
+    Applies a Tukey window, computes a standardized normalized FFT, and returns
+    frequencies, calibrated magnitude (dBSPL), phase vectors, and delta frequency.
     """
     gate_end_idx = max(10, min(gate_end_idx, len(audio_data)))
 
@@ -116,25 +106,6 @@ def compute_frequency_response(
     mag_db = 20.0 * np.log10(np.maximum(mag_normalized, 1e-12))
     
     phase_deg = np.angle(fft_result, deg=True)
-
-    # --- Apply Real-World Acoustic Calibration Matrices ---
-    if mic_sensitivity is not None and mic_sensitivity > 0:
-        sensitivity_v_pa = mic_sensitivity / 1000.0  # mV/Pa to V/Pa
-        p_ref = 20e-6  # 20 uPa reference pressure
-        spl_offset = -20.0 * np.log10(sensitivity_v_pa * p_ref)
-        mag_db += spl_offset
-
-    if mic_cal_file is not None:
-        # Assumes your read_mic_cal_file helper function is accessible globally
-        cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
-        mag_db -= cal_corrections
-
-    # Scale for stimulus RMS voltage
-    mag_db -= 20.0 * np.log10(v_stimulus)
-
-    # Scale for free-field acoustic measurement distance
-    if distance is not None:
-        mag_db += 20.0 * np.log10(distance)
 
     # Compute Minimum Phase response on the active windowed data
     try:
@@ -221,19 +192,10 @@ def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq,
 
 
 
-
-def nth_harmonic_time(n, duration, f1, f2):
-    """Computes the relative time offset of the n-th harmonic (or fractional order)
-    using Teemu Ikonen's Farina sweep formulation.
-    """
-    return -duration * np.log(n) / np.log(f2 / f1)
-
-
-
-def extract_harmonic_segment(full_ir, sample_rate, duration, start_freq, end_freq, linear_peak_idx, n):
+def extract_harmonic_segment(full_ir, sample_rate, duration, start_freq, end_freq, timezero_sample_idx, n):
     """
     Extracts the Nth harmonic segment using Teemu Ikonen's midpoint-boundary method 
-    and returns both the segment and its starting index.
+    and returns both the segment and its starting index, anchored to timezero_sample_idx.
     """
     order_t1 = n + 0.5
     order_t2 = (n - 1) + 0.5 if n > 1 else 1.5
@@ -241,8 +203,8 @@ def extract_harmonic_segment(full_ir, sample_rate, duration, start_freq, end_fre
     t1 = -duration * np.log(order_t1) / np.log(end_freq / start_freq)
     t2 = -duration * np.log(order_t2) / np.log(end_freq / start_freq)
     
-    start_idx = linear_peak_idx + int(round(t1 * sample_rate))
-    end_idx = linear_peak_idx + int(round(t2 * sample_rate))
+    start_idx = timezero_sample_idx + int(round(t1 * sample_rate))
+    end_idx = timezero_sample_idx + int(round(t2 * sample_rate))
     
     start_idx, end_idx = min(start_idx, end_idx), max(start_idx, end_idx)
     start_idx = max(0, min(start_idx, len(full_ir)))
@@ -253,124 +215,181 @@ def extract_harmonic_segment(full_ir, sample_rate, duration, start_freq, end_fre
 
 
 
+
 def run_farina_analysis(
-        recorded_audio,
-        sample_rate,
-        inv_filter,
-        start_freq,
-        gate_start_offset,  # Changed to relative sample offsets (e.g., -100)
-        gate_end_offset,    # Changed to relative sample offsets (e.g., 1000)
-        tukey_alpha,
-        mic_cal_file,
-        mic_sensitivity,
-        v_stimulus,
-        distance,
-        max_harmonic=5
-    ):
+    recorded_audio,
+    sample_rate,
+    inv_filter,
+    start_freq,
+    max_valid_freq,
+    Fgrid_density,
+    gate_start_idx,
+    gate_end_idx,
+    timezero_sample_idx,
+    tukey_alpha,
+    max_harmonic=5
+):
     """
-          function run_farina_analysis:
-          Uses the Farina method to extract linear and nonlinear distortion 
-          responses from a recorded exponential sine sweep.
+    function run_farina_analysis:
+    Uses the Farina method to extract linear and nonlinear distortion 
+    responses from a recorded exponential sine sweep, supporting either 
+    a raw linear frequency grid (when Fgrid_density = 0) or a logarithmic 
+    energy-averaged grid on Fgrid_density frequencies per octave.
 
-          Parameters:
-          -----------
-          recorded_audio : numpy.ndarray
-              The raw audio data recorded from the measurement microphone.
-          sample_rate : int
-              The sampling rate of the audio data in Hz.
-          inv_filter : numpy.ndarray
-              The pre-generated inverse filter matching the stimulus sweep.
-          start_freq : float
-              The starting frequency of the logarithmic sweep in Hz.
-          gate_start_idx : int
-              The sample index where the user-defined time-domain reflection window begins.
-          gate_end_idx : int
-              The sample index where the user-defined time-domain reflection window ends.
-          tukey_alpha : float
-                  The shape parameter for the Tukey window applied to each impulse slice.
-          mic_cal_file : str or None
-              Path to the microphone calibration file, or None if unused.
-          mic_sensitivity : float or None
-              Microphone sensitivity in milliVolts per Pascal (mV/Pa), or None if unused.
-          v_stimulus : float
-              The RMS voltage of the playback stimulus.
-          distance : float or None
-              The measurement distance in meters, or None if unused.
-          max_harmonic : int, optional
-              The maximum harmonic order to extract and analyze (default is 5).
+    Parameters:
+    -----------
+    recorded_audio : numpy.ndarray
+        The raw audio data recorded from the measurement microphone.
+    sample_rate : int
+        The sampling rate of the audio data in Hz.
+    inv_filter : numpy.ndarray
+        The pre-generated inverse filter matching the stimulus sweep.
+    start_freq : float
+        The starting frequency of the logarithmic sweep in Hz.
+    max_valid_freq : float
+        The maximum valid frequency limit for the analysis in Hz.
+    Fgrid_density : float or int
+        Frequency grid density in points per octave. Set to 0 for a raw linear FFT grid.
+    gate_start_idx : int
+        The absolute sample index where the response window begins.
+    gate_end_idx : int
+        The absolute sample index where the response window ends.
+    timezero_sample_idx : int
+        The absolute sample index corresponding to the time=0 position.
+    tukey_alpha : float
+        The shape parameter for the Tukey window applied to each impulse slice.
+    max_harmonic : int, optional
+        The maximum harmonic order to extract and analyze (default is 5).
 
-          Returns:
-          --------
-          dict
-              A dictionary containing frequency response data (frequencies, magnitude in dB, 
-              standard phase, minimum phase, and frequency resolution) for each harmonic 
-              index `k`, as well as the total harmonic distortion percentage ("thd_percent").
+    Returns:
+    --------
+    dict
+        A dictionary containing frequency response data, phase, 
+        minimum phase, and THD percentage.
     """ 
     duration = len(inv_filter) / sample_rate
     nyquist = 0.5 * sample_rate
-    end_freq = 0.99 * nyquist
 
     # 1. Perform Fast Deconvolution
     full_ir = scipy.signal.fftconvolve(recorded_audio, inv_filter, mode='full')
-    linear_peak_idx = np.argmax(np.abs(full_ir))
+
+    # Calculate active window length based on absolute indices
+    window_len = gate_end_idx - gate_start_idx
+    
+    peak_indices, warnings_list, overlaps = check_harmonic_window_overlaps(
+        full_ir=full_ir,
+        inv_filter=inv_filter,
+        sample_rate=sample_rate,
+        start_freq=start_freq,
+        gate_start_idx=gate_start_idx,
+        gate_end_idx=gate_end_idx,
+        max_harmonic=max_harmonic
+    )
+
+    if warnings_list:
+        print("Farina Harmonic Window Warning:")
+        for warning in warnings_list:
+            print(f"  -> {warning}")
 
     harmonic_results = {}
 
     # 2. Extract and process each harmonic cleanly
     for k in range(1, max_harmonic + 1):
         if k == 1:
-            # Linear fundamental gate anchored relative to the dynamic peak idx
-            start_idx = linear_peak_idx + gate_start_offset
-            end_idx = linear_peak_idx + gate_end_offset
+            start_idx = gate_start_idx
+            end_idx = gate_end_idx
             segment = full_ir[start_idx:end_idx].copy()
         else:
-            # FIXED: Use Ikonen's midpoint-boundary method to automatically and 
-            # rigorously scale the extraction window width inversely with order (1/k)
             segment, start_idx = extract_harmonic_segment(
-                full_ir, sample_rate, duration, start_freq, end_freq, linear_peak_idx, k
+                full_ir, sample_rate, duration, start_freq, 0.99 * nyquist, timezero_sample_idx, k
             )
 
-        # FIXED: Pass calibration parameters uniformly across all harmonics
         freqs, mag_db, phase_deg, min_phase_deg, delta_f, raw_fft = compute_frequency_response(
             audio_data=segment,
             sample_rate=sample_rate,
             gate_end_idx=len(segment),
-            tukey_alpha=tukey_alpha,
-            mic_cal_file=mic_cal_file,
-            mic_sensitivity=mic_sensitivity,
-            v_stimulus=v_stimulus,
-            distance=distance
+            tukey_alpha=tukey_alpha
         )
 
-        # 1. Apply the Phase Matrix Rotation on the raw, uncompressed grid first
-        time_delay = (start_idx - linear_peak_idx) / sample_rate
-        phase_rotation = np.exp(1j * 2.0 * np.pi * freqs * time_delay)
+        # Add Phase Rotation relative to timezero_sample_idx
+        time_delay = (start_idx - timezero_sample_idx) / sample_rate
+        phase_rotation = np.exp(1j * -2.0 * np.pi * freqs * time_delay)
         aligned_fft = raw_fft * phase_rotation
         
-        # 2. Re-extract unwrapped phase maps cleanly from the aligned spectrum
         corrected_phase = np.angle(aligned_fft, deg=True)
         corrected_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(corrected_phase)))
         corrected_min_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(min_phase_deg)))
 
-        # 3. Apply Farina Core Adjustments: Compress axis and add octave energy density scale
         corrected_freqs = freqs / k
         corrected_mag_db = mag_db.copy()
         
         if k > 1:
             corrected_mag_db += 20.0 * np.log10(k)
 
-        # 4. Mask out empty high frequency range where the harmonic physically stops
-        valid_idx = corrected_freqs <= (sample_rate / (2.0 * k))
+        # --- FREQUENCY GRID SELECTION ---
+        if float(Fgrid_density) == 0.0:
+            # Retain raw linear FFT grid from DC to Nyquist
+            log_freqs = corrected_freqs
+            log_mag_db = corrected_mag_db
+            log_phase = corrected_phase_unwrapped
+            log_min_phase = corrected_min_phase_unwrapped
+        else:
+            # --- LOGARITHMIC FREQUENCY GRID & ENERGY AVERAGING ---
+            window_width = window_len / sample_rate
+            f_window_limit = 1.0 / window_width if window_width > 0 else 0.0
+            
+            f_start = max(start_freq, f_window_limit, 10.0)
+            harm_max_valid_freq = max_valid_freq / k
+            f_max = min(harm_max_valid_freq, 0.92 * nyquist / k)
+            
+            if f_start < f_max:
+                n_octaves = np.log2(f_max / f_start)
+                num_points = int(np.ceil(n_octaves * float(Fgrid_density))) + 1
+                log_freqs = f_start * (2.0 ** (np.arange(num_points) / float(Fgrid_density)))
+                log_freqs = log_freqs[log_freqs <= f_max]
+                
+                log_mag_db = np.zeros_like(log_freqs)
+                half_octave_factor = 2.0 ** (1.0 / (2.0 * float(Fgrid_density)))
+                
+                for i, fc in enumerate(log_freqs):
+                    f_low = fc / half_octave_factor
+                    f_high = fc * half_octave_factor
+                    bin_mask = (corrected_freqs >= f_low) & (corrected_freqs < f_high)
+                    
+                    if np.any(bin_mask):
+                        # Energy averaging using np.mean to normalize for expanding bandwidth
+                        p_lin = 10.0 ** (corrected_mag_db[bin_mask] / 10.0)
+                        log_mag_db[i] = 10.0 * np.log10(np.mean(p_lin))
+                    else:
+                        log_mag_db[i] = np.interp(fc, corrected_freqs, corrected_mag_db)
+                        
+                log_phase = np.interp(log_freqs, corrected_freqs, corrected_phase_unwrapped)
+                log_min_phase = np.interp(log_freqs, corrected_freqs, corrected_min_phase_unwrapped)
+            else:
+                log_freqs = np.array([f_start])
+                log_mag_db = np.array([0.0])
+                log_phase = np.array([0.0])
+                log_min_phase = np.array([0.0])
+        # -----------------------------------------------------
+
+        # --- ADDITIONAL FREQUENCY MASKING FOR k >= 1 ---
+        # Mask out any frequencies exceeding the valid harmonic limit (sets invalid bins to NaN)
+        max_k_freq = min(max_valid_freq / k, 0.92 * nyquist / k)
+        invalid_mask = log_freqs > max_k_freq
+        if np.any(invalid_mask):
+            log_mag_db[invalid_mask] = np.nan
+            log_phase[invalid_mask] = np.nan
+            log_min_phase[invalid_mask] = np.nan
 
         harmonic_results[k] = {
-            'freqs': corrected_freqs[valid_idx],
-            'mag_db': corrected_mag_db[valid_idx],
-            'phase': corrected_phase_unwrapped[valid_idx],
-            'min_phase': corrected_min_phase_unwrapped[valid_idx],
+            'freqs': log_freqs,
+            'mag_db': log_mag_db,
+            'phase': log_phase,
+            'min_phase': log_min_phase,
             'delta_frequency': delta_f
         }
 
-    # 3. Low-Frequency Boundary Truncation Matrix for THD Calculations
+    # 3. Low-Frequency Boundary Truncation Matrix for THD Calculations & Grid Unification
     if 1 in harmonic_results and len(harmonic_results) > 1:
         f_ref = harmonic_results[1]['freqs']
         h1_mag = harmonic_results[1]['mag_db']
@@ -380,17 +399,24 @@ def run_farina_analysis(
         
         for k in range(2, max_harmonic + 1):
             if k in harmonic_results:
-                # Interpolate the harmonic curves onto the common fundamental frequency grid
-                mag_k_interp = np.interp(f_ref, harmonic_results[k]['freqs'], harmonic_results[k]['mag_db'])
+                h_data = harmonic_results[k]
                 
-                # Compute proportional distance and convert to standard linear fraction ratio
+                mag_k_interp = np.interp(f_ref, h_data['freqs'], h_data['mag_db'], left=np.nan, right=np.nan)
+                phase_k_interp = np.interp(f_ref, h_data['freqs'], h_data['phase'], left=np.nan, right=np.nan)
+                min_phase_k_interp = np.interp(f_ref, h_data['freqs'], h_data['min_phase'], left=np.nan, right=np.nan)
+                
                 linear_ratio = 10.0 ** ((mag_k_interp - h1_mag) / 20.0)
                 
-                # FIXED: Mask out high frequencies where this specific harmonic order physically stops existing
                 max_harmonic_freq = sample_rate / (2.0 * k)
                 linear_ratio[f_ref > max_harmonic_freq] = 0.0
+                mag_k_interp[f_ref > max_harmonic_freq] = np.nan
                 
-                sum_sq_harmonics_linear += linear_ratio ** 2
+                sum_sq_harmonics_linear += np.nan_to_num(linear_ratio ** 2, nan=0.0)
+                
+                harmonic_results[k]['freqs'] = f_ref
+                harmonic_results[k]['mag_db'] = mag_k_interp
+                harmonic_results[k]['phase'] = phase_k_interp
+                harmonic_results[k]['min_phase'] = min_phase_k_interp
                 
         thd_linear = np.sqrt(sum_sq_harmonics_linear)
         thd_percent = thd_linear * 100.0
@@ -408,21 +434,161 @@ def run_farina_analysis(
 
 
 
+def read_wav_file_plus_info(filename):
+  """Reads a 32-bit float mono WAV file and extracts the audio data,
+        the sample rate, and the following metadata into a dictionary:
+                             parameter <> chunk identifier:
+                      sweep start freq <> f0sw
+                        sweep end freq <> f1sw
+                           repetitions <> reps
+                            chirp rate <> rchr
+                        internal level <> levl
+  hf_window start F for inverse filter <> fhfw
+                             timestamp <> date
+  """
+  with open(filename, "rb") as f:
+    # 1. Verify RIFF header
+    riff = f.read(4)
+    if riff != b"RIFF":
+      raise ValueError("Not a valid RIFF WAV file.")
+
+    file_size = struct.unpack("<I", f.read(4))[0]
+    wave = f.read(4)
+    if wave != b"WAVE":
+      raise ValueError("Not a valid WAVE file.")
+
+    sample_rate = None
+    audio_data = []
+    custom_metadata = {}
+
+    # 2. Traverse file chunks iteratively
+    while True:
+      chunk_id = f.read(4)
+      if not chunk_id or len(chunk_id) < 4:
+        break
+
+      chunk_size_bytes = f.read(4)
+      if not chunk_size_bytes or len(chunk_size_bytes) < 4:
+        break
+      chunk_size = struct.unpack("<I", chunk_size_bytes)[0]
+
+      if chunk_id == b"fmt ":
+        fmt_data = f.read(chunk_size)
+        # Extract audio format, number of channels, and sample rate
+        audio_format, num_channels, sample_rate = struct.unpack(
+            "<HHI", fmt_data[:8]
+        )
+        if audio_format != 3:  # 3 indicates IEEE float format
+          raise ValueError(
+              "WAV file is not in 32-bit IEEE float format (format tag 3)."
+          )
+
+      elif chunk_id == b"data":
+        data_bytes = f.read(chunk_size)
+        num_samples = chunk_size // 4
+        audio_data = list(struct.unpack(f"<{num_samples}f", data_bytes))
+
+      elif chunk_id == b"xDAT":
+        xdat_data = f.read(chunk_size)
+        offset = 0
+        # Parse 8-byte blocks: 4 bytes tag + 4 bytes value
+        while offset < chunk_size:
+          tag = xdat_data[offset : offset + 4].decode("utf-8", errors="ignore")
+          offset += 4
+
+          if tag in ("date", "reps"):
+            # Timestamp and repetitions are stored as uint32 integers
+            val = struct.unpack("<I", xdat_data[offset : offset + 4])[0]
+          else:
+            # All other parameters are stored as floats
+            val = struct.unpack("<f", xdat_data[offset : offset + 4])[0]
+          offset += 4
+
+          custom_metadata[tag] = val
+      else:
+        # Skip unknown chunks
+        f.seek(chunk_size, 1)
+
+      # Handle RIFF word-alignment padding (chunks must be even-sized bytes)
+      if chunk_size % 2 != 0:
+        f.seek(1, 1)
+
+    return sample_rate, audio_data, custom_metadata
 
 
 
 
-def read_wav_file(filename):
-    """
-    Reads a mono WAV file and returns the sample rate and raw audio data.
-    """
-    sample_rate, data = wav.read(filename)
-    
-    # Handle stereo files by taking the first channel if necessary
-    if data.ndim > 1:
-        data = data[:, 0]
-        
-    return sample_rate, data
+def Is_Consistent_Data(metadata_dicts, tolerance=1e-5):
+  """Validates a list of pre-loaded custom metadata dictionaries to ensure
+  key parameters match across the set.
+                         key parameter <> chunk identifier:
+                      sweep start freq <> f0sw
+                        sweep end freq <> f1sw
+                           repetitions <> reps
+                            chirp rate <> rchr
+                        internal level <> levl
+  hf_window start F for inverse filter <> fhfw
+  """
+  if not metadata_dicts or len(metadata_dicts) < 2:
+    return True  # 0 or 1 dictionary automatically matches
+
+  # Establish the first dictionary as the baseline reference
+  baseline = metadata_dicts[0]
+  keys_to_check = ["f0sw", "f1sw", "reps", "rchr", "levl", "fhfw"]
+
+  mismatches_found = False
+
+  # Compare subsequent dictionaries against the baseline
+  for idx, meta in enumerate(metadata_dicts[1:], start=2):
+    for key in keys_to_check:
+      val_base = baseline.get(key)
+      val_curr = meta.get(key)
+
+      # Check if a key is missing entirely
+      if val_base is None or val_curr is None:
+        print(f"Error: Missing key '{key}' in dictionary 1 or dictionary {idx}")
+        mismatches_found = True
+        continue
+
+      # Compare based on whether values are numeric (float/int)
+      if isinstance(val_base, (int, float)) and isinstance(
+          val_curr, (int, float)
+      ):
+        # Use math.isclose if either value is a float
+        if isinstance(val_base, float) or isinstance(val_curr, float):
+          if not math.isclose(
+              float(val_base),
+              float(val_curr),
+              rel_tol=tolerance,
+              abs_tol=tolerance,
+          ):
+            print(f"Mismatch in parameter '{key}':")
+            print(f"  - Baseline (Dict 1): {val_base}")
+            print(f"  - Dict {idx}: {val_curr}")
+            mismatches_found = True
+        else:
+          # Exact comparison for integers
+          if val_base != val_curr:
+            print(f"Mismatch in parameter '{key}':")
+            print(f"  - Baseline (Dict 1): {val_base}")
+            print(f"  - Dict {idx}: {val_curr}")
+            mismatches_found = True
+      else:
+        # Fallback exact comparison for non-numeric types
+        if val_base != val_curr:
+          print(f"Mismatch in parameter '{key}':")
+          print(f"  - Baseline (Dict 1): {val_base}")
+          print(f"  - Dict {idx}: {val_curr}")
+          mismatches_found = True
+
+  if mismatches_found:
+    print("\nParameter mismatch detected across dictionaries.")
+    return False
+  else:
+    print(
+        "\nAll dictionary parameters match successfully."
+    )
+    return True
 
 
 
@@ -469,115 +635,69 @@ def write_frd_file(filename, freqs, mag_db, phase_deg):
     - Frequency: Fixed float with 1 decimal place (Hz)
     - Magnitude: 2 decimal places (dB)
     - Phase: 1 decimal place (degrees)
+    - Automatically skips any NaN or infinite values.
     """
     try:
+        # Ensure inputs are numpy arrays for safe masking
+        freqs = np.asarray(freqs)
+        mag_db = np.asarray(mag_db)
+        phase_deg = np.asarray(phase_deg)
+        
+        # Create a mask that keeps only valid, finite numbers across all arrays
+        valid_mask = np.isfinite(freqs) & np.isfinite(mag_db) & np.isfinite(phase_deg)
+        
         with open(filename, 'w') as f:
             f.write("* Frequency Response Data (FRD)\n")
             f.write("* Columns: Frequency (Hz), Magnitude (dB), Phase (deg)\n")
             
-            for freq, mag, phase in zip(freqs, mag_db, phase_deg):
+            # Iterate only over the filtered, valid data points
+            for freq, mag, phase in zip(freqs[valid_mask], mag_db[valid_mask], phase_deg[valid_mask]):
                 freq_str = f"{freq:.1f}"
                 mag_str = f"{mag:.2f}"
                 phase_str = f"{phase:.1f}"
                 
                 f.write(f"{freq_str}\t{mag_str}\t{phase_str}\n")
                 
-        print(f"Successfully saved FRD data to {filename}")
+        print(f"   ...saved {filename}")
     except Exception as e:
-        print(f"Error saving FRD file: {e}")
+        print(f"WARNING: The following error was encountered when attempting to save file {filename}: {e}")
 
 
 
-
-def fractional_octave_smoothing(freqs, mag_db, fraction=3):
-    """
-    Applies fractional octave smoothing to a frequency response magnitude curve.
+def show_notification(title, message):
+    # Create a hidden root window
+    root = tk.Tk()
+    root.withdraw()
     
-    Parameters:
-    -----------
-    freqs : numpy.ndarray
-        Frequency array in Hz (must be strictly positive).
-    mag_db : numpy.ndarray
-        Magnitude array in dB.
-    fraction : int or float, optional
-        Fractional octave denominator (e.g., 3 for 1/3 octave, 12 for 1/12 octave).
-        
-    Returns:
-    --------
-    numpy.ndarray
-        Smoothed magnitude array in dB.
-    """
-    freqs = np.asarray(freqs, dtype=float)
-    mag_db = np.asarray(mag_db, dtype=float)
+    # Bring the dialog to the front (helpful if working with other GUI frameworks)
+    root.attributes('-topmost', True)
     
-    smoothed_mag_db = np.empty_like(mag_db)
+    # Pop up the modal message box (this pauses execution until OK is clicked)
+    messagebox.showinfo(title, message)
     
-    # Octave bandwidth factor constant: 2^(1 / (2 * fraction))
-    b = 2.0 ** (1.0 / (2.0 * fraction))
-    
-    for i, f0 in enumerate(freqs):
-        if f0 <= 0:
-            smoothed_mag_db[i] = mag_db[i]
-            continue
-            
-        # Define lower and upper frequency bounds for the smoothing band
-        f_lower = f0 / b
-        f_upper = f0 * b
-        
-        # Find all frequency points falling within the fractional band
-        mask = (freqs >= f_lower) & (freqs <= f_upper)
-        
-        if np.any(mask):
-            # Average the dB values within the band
-            smoothed_mag_db[i] = np.mean(mag_db[mask])
-        else:
-            smoothed_mag_db[i] = mag_db[i]
-            
-    return smoothed_mag_db
+    # Clean up the hidden root window
+    root.destroy()
 
 
 
-def generate_smoothed_results(harmonic_results, smoothing_fraction):
-    """
-    Takes the raw harmonic_results dictionary and returns a new dictionary 
-    with smoothed magnitude and THD curves at the specified fraction.
-    """
-    if smoothing_fraction is None:
-        # If no smoothing is requested, just return a copy of the raw results
-        return harmonic_results.copy()
-        
-    smoothed_results = {}
-    
-    for k, data in harmonic_results.items():
-        if k == 'thd_percent':
-            # Smooth the THD curve directly
-            smoothed_results['thd_percent'] = fractional_octave_smoothing(
-                harmonic_results['freqs'], data, fraction=smoothing_fraction
-            )
-        elif isinstance(data, dict):
-            # It's a harmonic sub-dictionary (e.g., 1, 2, 3...)
-            smoothed_results[k] = data.copy()
-            if 'mag_db' in data:
-                smoothed_results[k]['mag_db'] = fractional_octave_smoothing(
-                    data['freqs'], data['mag_db'], fraction=smoothing_fraction
-                )
-        else:
-            # Copy over global keys like 'freqs', 'phase', etc., unchanged
-            smoothed_results[k] = data
-            
-    return smoothed_results
-
-
+# ============================================================================ #
+#                                                                              #
+#                        ****   MAIN FUNCTION   ****                           # 
+#                                                                              #
+# ============================================================================ #
 
 def main():
+    # PROGRAM CONSTANTS
+    MAX_HD_ORDER = 11
+
     # Parse command-line arguments
     args = parse_arguments()
     
     try:
-        # Read the raw microphone data and Farina inverse filter
-        sample_rate, mic_data = read_wav_file(args.mic_data)
-        _, inv_filter = read_wav_file(args.farina_filter)
-        
+        # Read the raw microphone data, Farina inverse filter, and stimulus data
+        sample_rate, mic_data, mic_metadata = read_wav_file_plus_info(args.measurement_datafile)
+        FF_sample_rate, inv_filter, FF_metadata = read_wav_file_plus_info(args.farina_filterfile)
+        H1_sample_rate, h1_impulse, impulse_metadata = read_wav_file_plus_info(args.impulse_datafile)
     except FileNotFoundError as e:
         print(f"Error: Required file not found - {e}")
         return
@@ -585,69 +705,134 @@ def main():
         print(f"Error reading WAV file: {e}")
         return
     
-    # Compute the full impulse response using Farina deconvolution
-    print("Computing full impulse response via convolution...")
+    if not ( H1_sample_rate == FF_sample_rate == sample_rate ):
+        print(f"ERROR: The sample rates of the measurement, Farina filter, and impulse response do not agree:")
+        print(f"   Measurement data SR = '{sample_rate}' Hz")
+        print(f"   Farina filter SR = '{FF_sample_rate}' Hz")
+        print(f"   Impulse Response SR = '{H1_sample_rate}' Hz")
+        print(f"All sample rates must be identical. Exiting.")
+        return
+
+    """
+    # Run a validation check on the metadata from each input file
+    all_metadata = [mic_metadata, FF_metadata, impulse_metadata]
+    if not Is_Consistent_Data(all_metadata):
+        print("ERROR: parameter mismatch between the measurement, Farina filter, and impulse response data.")    
+        print("The parameters used during the measurement must be identical for all files!")
+        # Print out required measurement parameters
+        print(f"\n------------------------ Measurement Parameters: -------------------------------")
+        print(f"             Start Frequency (f0sw): {mic_metadata.get("f0sw", 0.0)} Hz")
+        print(f"               End Frequency (f1sw): {mic_metadata.get("f1sw", 0.0)} Hz")
+        print(f"                  Chirp Rate (rchr): {mic_metadata.get("rchr", 0.0)} seconds/decade Hz")
+        print(f"                 Repetitions (reps): {mic_metadata.get("reps", 1)}")
+        print(f"              Internal Level (levl): {mic_metadata.get("levl", -10.0)} dB")
+        print(f"             HF Window Start (fhfw): {mic_metadata.get("fhfw", 0.0)} Hz")
+        print(f"--------------------------------------------------------------------------------\n\n")
+        print("Exiting Program.")
+        return
+    else:
+        measurement_start_freq = mic_metadata.get("f0sw", 0.0)
+        measurement_timestamp = datetime.fromtimestamp(mic_metadata.get("date", 0))
+        # Print out validated parameters
+        print(f"\n------------------------ Measurement Parameters: -------------------------------")
+        print(f"             Start Frequency (f0sw): {mic_metadata.get("f0sw", 0.0)} Hz")
+        print(f"               End Frequency (f1sw): {mic_metadata.get("f1sw", 0.0)} Hz")
+        print(f"                  Chirp Rate (rchr): {mic_metadata.get("rchr", 0.0)} seconds/decade Hz")
+        print(f"                 Repetitions (reps): {mic_metadata.get("reps", 1)}")
+        print(f"              Internal Level (levl): {mic_metadata.get("levl", -10.0)} dB")
+        print(f"             HF Window Start (fhfw): {mic_metadata.get("fhfw", 0.0)} Hz")
+        print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
+        print(f"--------------------------------------------------------------------------------\n")
+    """    
+
+    #set these parmaeters manually during debugging  only ! < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < <
+    measurement_start_freq = 10.0
+    HF_window_startF = 0.91 * 0.5 * sample_rate
+
+    # 1. Compute the full impulse response using Farina deconvolution
+    print("Computing the time domain impulse response using the Farina method...")
     full_ir = scipy.signal.fftconvolve(mic_data, inv_filter, mode='full')
     
-    total_duration_ms = (len(full_ir) / sample_rate) * 1000.0
-    print(f"Sample Rate: {sample_rate} Hz | Total Duration: {total_duration_ms:.2f} ms")
+    print("Using the imported impulse response to correct the Farina time axis...")
+    # Determine the sample index in full_ir corresponding to time = 0
+    # Define the search bounds (middle 20% of full_ir) to isolate the main impulse
+    n_samples = len(full_ir)
+    window_start = int(0.4 * n_samples)
+    window_end = int(0.6 * n_samples)
+    farina_segment = full_ir[window_start:window_end]
 
-    time_axis = np.arange(len(full_ir)) / sample_rate
+    # Cross-correlate the Farina segment with the H1 impulse to find the relative shift
+    correlation = scipy.signal.correlate(farina_segment, h1_impulse, mode='full')
+    lags = scipy.signal.correlation_lags(len(farina_segment), len(h1_impulse), mode='full')
+    optimal_lag = lags[np.argmax(correlation)]
+
+    # t0_sample_index maps index 0 (time = 0) of the H1 reference to the Farina dataset,
+    # preserving the true propagation delay/latency.
+    t0_sample_index = window_start + optimal_lag
+    print(f"The corrected time=0 sample index in full_ir occurs at sample {t0_sample_index} of {n_samples} total samples.")
+
+    # Construct the corrected time axis where t = 0 matches the measurement start
+    time_axis = (np.arange(len(full_ir)) - t0_sample_index) / sample_rate * 1000.0
+
+    total_duration_ms = (len(full_ir) / sample_rate) * 1000.0
+    print(f"Sample Rate: {sample_rate} Hz | Duration of time data: {total_duration_ms/1000.0:.5f} seconds ({total_duration_ms:.2f} msec).\n")
     
-    # Determine y-axis label for magnitude based on whether mic sensitivity is supplied
+    # Determine y-axis label for magnitude based on whether spl correction factor was supplied
     if (
-        args.mic_sensitivity is not None
-        and args.mic_cal is not None
+        args.spl_correction_factor is not None
+        and args.mic_cal_file is not None
     ):
-        mag_ylabel = f"SPL [dB re 20 uPa @ {args.v_stimulus:.2f}V" 
-        if args.distance is not None:
-            mag_ylabel += "/1m"
+        mag_ylabel = f"SPL [dB re 20 uPa @ 2.83V/1m" 
     else:
         mag_ylabel = "Relative SPL [dB"
     mag_ylabel += "]"
     
     # Setup Figure and Subplots
     fig, (ax_time, ax_freq) = plt.subplots(2, 1, figsize=(10, 8.5))
-    plt.subplots_adjust(bottom=0.23)
+    plt.subplots_adjust(bottom=0.23, hspace=0.4)
     
-    # Plot Time Domain Impulse Response Data
-    ax_time.plot(time_axis * 1000, full_ir, color='b', lw=1, label='IR')
+    # Plot Time Domain Impulse Response Data with the corrected time axis
+    ax_time.plot(time_axis, full_ir, color='b', lw=1, label='IR')
     ax_time.set_title("Impulse Response (Time Domain)")
     ax_time.set_ylabel("Amplitude")
+    ax_time.set_xlabel("Time [msec]")
     ax_time.grid(True)
     
-    # Set initial x-axis (time) min and max values to show the main impulse
-    # near the middle of the time data
-    ax_time.set_xlim(0.42 * total_duration_ms, 0.65 * total_duration_ms)
+    # Set initial x-axis view to show from slightly before time=0 
+    # through the propagation delay and main impulse peak
+    ax_time.set_xlim(-5.0, 50.0)  # Adjust window as needed for your setup's distance
     
     # Initial gate indices
-    initial_gate_time_ms = time_axis[-1] * 1000
-    initial_gate_idx = len(full_ir)
-    initial_start_idx = 0  
-
-    initial_start_time_ms = (initial_start_idx / sample_rate) * 1000.0
+    initial_start_time_ms = 0.0
+    initial_start_idx = t0_sample_index
+    initial_gate_time_ms = 20.0
+    initial_gate_idx = t0_sample_index + int( initial_gate_time_ms * sample_rate / 1000.0 )
 
     # Add lines for both start and end gates
     start_line = ax_time.axvline(x=initial_start_time_ms, color='orange', linestyle='--', lw=1.5, label='Window Start')
     gate_line  = ax_time.axvline(x=initial_gate_time_ms,  color='g',     linestyle='--', lw=1.5, label='Window End')
+    t0_line  = ax_time.axvline(x=0.0,  color='black',     linestyle='--', lw=1.5, label='time=0')
     
     # State variables
     state = {
         'gate_idx': initial_gate_idx,            
-        'gate_start_idx': initial_start_idx,    
+        'gate_start_idx': initial_start_idx,
+        'user_has_set_gate': False,    
         'selecting_gate_step': 0,               
         'temp_start_time_ms': 0.0,              
         'selecting_gate': False,
         'raw_harmonic_results': None,
         'smoothed_harmonic_results': None,
         'selected_harmonic': 'H1',
-        'hd_max': 3,
+        'hd_max': 5,
         'freq_line_plot': None,
         'showing_phase': False,
         'using_min_phase': False,
         'tukey_alpha': 0.1,
         'resolution': None,
-        'smoothing_octaves': 12
+        'smoothing_octaves': 24,
+        'last_smoothing_octaves': 24,
+        'HF_window_startF': HF_window_startF
     }
     
     initial_win = scipy.signal.get_window(('tukey', state['tukey_alpha']), initial_gate_idx)
@@ -656,15 +841,42 @@ def main():
     window_line, = ax_time.plot(time_axis[:initial_gate_idx] * 1000, initial_win * (0.95 * initial_y_top), color='r', lw=1.5, label='Tukey Window')
     
     ax_time.legend(loc='lower right', framealpha=1.0, facecolor='white', edgecolor='black')
-    
+
+    # Get the current handles and labels from the axis
+    handles, labels = ax_time.get_legend_handles_labels()
+
+    # Recreate the legend while skipping the first entry (index 0)
+    ax_time.legend(handles[1:], labels[1:],loc='lower right', framealpha=1.0, facecolor='white', edgecolor='black')
+
     # Configure Frequency Domain Plot
     ax_freq.set_title("Frequency Domain Data")
     ax_freq.set_xlabel("Frequency (Hz)")
     ax_freq.set_ylabel(mag_ylabel)
     ax_freq.set_xscale('log')
-    ax_freq.set_xlim(20, sample_rate / 2.0)
     ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
-    ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
+
+    # Set up initial x-axis:
+    ax_freq.set_xlim(20, 20000)
+    
+    # Define initial custom frequency ticks
+    custom_ticks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
+    ax_freq.set_xticks(custom_ticks)
+    
+    # Custom frequency formatter for clean labels (e.g., 1k, 10k, 20k)
+    def freq_formatter(x, pos):
+        if x >= 1000:
+            return f"{int(x // 1000)}k" if x % 1000 == 0 else f"{x / 1000:g}k"
+        else:
+            return f"{int(x) if x == int(x) else x}"
+            
+    ax_freq.xaxis.set_major_formatter(ticker.FuncFormatter(freq_formatter))
+    
+    # Optional: Clean minor ticks handled automatically
+    ax_freq.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
+
+    #initialize old_xlim
+    old_xlim = ax_freq.get_xlim()
+
     
     # Button Axes
     btn_y = 0.03
@@ -684,19 +896,19 @@ def main():
     
     # Row widgets position specifiers: [left, bottom, width, height]
     # Tukey width
-    ax_box_tukey = plt.axes([0.08, 0.10, 0.05, 0.03])
-    textbox_tukey = TextBox(ax_box_tukey, 'TUKEY: ', initial=str(state['tukey_alpha']), textalignment='center')
+    ax_box_tukey = plt.axes([0.13, 0.10, 0.05, 0.03])
+    textbox_tukey = TextBox(ax_box_tukey, 'TUKEY alpha: ', initial=str(state['tukey_alpha']), textalignment='center')
 
     # HD Max
-    ax_box_hd_max = plt.axes([0.24, 0.10, 0.02, 0.03])
+    ax_box_hd_max = plt.axes([0.28, 0.10, 0.03, 0.03])
     textbox_hd_max = TextBox(ax_box_hd_max, 'HD MAX: ', initial=str(state['hd_max']), textalignment='center')
 
     # Smoothing Octaves
-    ax_box_sm_octaves = plt.axes([0.48, 0.10, 0.02, 0.03])
+    ax_box_sm_octaves = plt.axes([0.51, 0.10, 0.03, 0.03])
     textbox_sm_octaves = TextBox(ax_box_sm_octaves, 'OCTAVE SMOOTHING 1/: ', initial=str(state['smoothing_octaves']), textalignment='center')
 
     # Phase Type
-    ax_box_phase_type = plt.axes([0.65, 0.10, 0.13, 0.03])
+    ax_box_phase_type = plt.axes([0.66, 0.10, 0.13, 0.03])
     initial_text = 'minimum phase' if state['using_min_phase'] else 'regular phase'
     phase_textbox = TextBox(ax_box_phase_type, 'PHASE TYPE: ', initial=initial_text, textalignment='center')
     phase_textbox.set_active(False)
@@ -724,14 +936,17 @@ def main():
         end_idx = state['gate_idx']
         
         if start_idx < end_idx:
-            win_len = end_idx - start_idx
+            win_len = end_idx - start_idx + 1
             win = scipy.signal.get_window(('tukey', state['tukey_alpha']), win_len)
             
-            window_line.set_xdata(time_axis[start_idx:end_idx] * 1000)
+            # Fix 1: time_axis is already in milliseconds, remove the extra * 1000 multiplier
+            window_line.set_xdata(time_axis[start_idx:end_idx + 1])
             window_line.set_ydata(win * (0.95 * y_top))
             
-            start_time_ms = (start_idx / sample_rate) * 1000.0
-            end_time_ms = (end_idx / sample_rate) * 1000.0
+            # Fix 2: Correctly map absolute sample indices back to the shifted ms time axis
+            start_time_ms = ((start_idx - t0_sample_index) / sample_rate) * 1000.0
+            end_time_ms = ((end_idx - t0_sample_index) / sample_rate) * 1000.0
+            
             start_line.set_xdata([start_time_ms, start_time_ms])
             gate_line.set_xdata([end_time_ms, end_time_ms])
             
@@ -743,12 +958,14 @@ def main():
     def submit_tukey_alpha(text):
         try:
             val = float(text)
-            if 0.01 <= val <= 0.5:
+            if 0.001 <= val <= 0.3:
                 state['tukey_alpha'] = val
                 print(f"Tukey alpha updated to: {state['tukey_alpha']}")
                 update_tukey_visual()
             else:
-                print(f"Error: Tukey alpha ({val}) out of bounds. Must be between 0.01 and 0.5.")
+                user_message = f"Error: A Tukey alpha of ({val}) is out of bounds. Must be between 0.001 and 0.3."
+                print(user_message)
+                show_notification("Error", user_message)
                 textbox_tukey.set_val(str(state['tukey_alpha']))
         except ValueError:
             textbox_tukey.set_val(str(state['tukey_alpha']))
@@ -758,15 +975,22 @@ def main():
     def submit_hd_max(text):
         try:
             val = int(text)
-            if 2 <= val <= 6:
+            if 2 <= val <= MAX_HD_ORDER:
+                if val == state['hd_max']:
+                    return
                 state['hd_max'] = val
-                print(f"HD MAX updated to: {state['hd_max']}")
+                user_message = f"A new HD MAX of {state['hd_max']} was provided.\n" 
+                user_message += "Press Compute/Clear to clear the data and then again to show the new results."
+                print(user_message)
+                show_notification("Error", user_message)
                 state['selected_harmonic'] = 'H1'
                 textbox_dataset.set_val('H1')
                 if state['smoothed_harmonic_results'] is not None:
                     refresh_frequency_plot()
             else:
-                print("Error: valid HD MAX values are 2 through 6.")
+                user_message = f"Error: valid HD MAX values are 2 through '{MAX_HD_ORDER}'."
+                print(user_message)
+                show_notification("Error", user_message)
                 textbox_hd_max.set_val(str(state['hd_max']))
         except ValueError:
             textbox_hd_max.set_val(str(state['hd_max']))
@@ -775,26 +999,36 @@ def main():
 
     def submit_smoothing(text):
         try:
-            # Allow users to turn off smoothing by typing "None", "off", "0", or leaving it blank
             cleaned = text.strip().lower()
             if cleaned in ('none', 'off', '0', ''):
-                val = None
+                val = 0
             else:
                 val = int(text)
                 
-            # Validate reasonable fractional octave range (e.g., 1 to 48, or None)
-            if val is None or (1 <= val <= 48):
-                state['smoothing_octaves'] = val
-                print(f"Smoothing Octaves updated to: {state['smoothing_octaves']}")
+            # Safely ensure type consistency for comparison
+            current_last = int(state['last_smoothing_octaves']) if state['last_smoothing_octaves'] is not None else 0
+            
+            if val == current_last:
+                return
                 
-                # Recompute the smoothed dataset from the immutable raw results
-                if state.get('raw_harmonic_results') is not None:
-                    state['smoothed_harmonic_results'] = generate_smoothed_results(
-                        state['raw_harmonic_results'], state['smoothing_octaves']
-                    )
-                    refresh_frequency_plot()
+            if 0 <= val <= 48:
+                user_message = "A new smoothing level was provided.\nPress Compute/Clear to clear the data and then again to show the new "
+                state['smoothing_octaves'] = val
+                
+                if val == 0:
+                    user_message += "unsmoothed data."
+                else:
+                    user_message += f"data smoothed to 1/{val} octave."
+                
+                # FIX: Moved print and notification OUTSIDE the inner if/else so they run for val == 0 too
+                print(user_message)
+                show_notification("Tip", user_message)
+                
+                state['last_smoothing_octaves'] = val 
             else:
-                print("Error: Smoothing fraction must be between 1 and 48 (or None).")
+                user_message = "You entered an invalid value. Valid octave smoothing values run from 0 (raw FFT bins) to 48 points per octave."
+                print(user_message)
+                show_notification("Error", user_message)
                 current_val = state['smoothing_octaves']
                 textbox_sm_octaves.set_val(str(current_val) if current_val is not None else "None")
                 
@@ -809,16 +1043,19 @@ def main():
     def on_click_time_plot(event):
         if state['selecting_gate_step'] > 0 and event.inaxes == ax_time:
             clicked_time_ms = event.xdata
-            if clicked_time_ms is not None and clicked_time_ms >= 0:
-                clicked_sample = int((clicked_time_ms / 1000.0) * sample_rate)
+            if clicked_time_ms is not None:
+                # Convert the clicked time (relative to the new t=0 point) back to an absolute sample index
+                clicked_sample = t0_sample_index + int((clicked_time_ms / 1000.0) * sample_rate)
                 
                 if state['selecting_gate_step'] == 1:
                     state['temp_start_time_ms'] = clicked_time_ms
-                    print(f"Start taper end placed at: {clicked_time_ms:.2f} ms. Now click the Window End (Reflection limit).")
+                    print(f"   The end of the window taper was placed at: {clicked_time_ms:.2f} ms.")
+                    print(f"Step 2 of 2: Now click again to set the Window end time(Reflection limit).")
                     state['selecting_gate_step'] = 2
                     
                 elif state['selecting_gate_step'] == 2:
-                    clicked_onset_sample = int((state['temp_start_time_ms'] / 1000.0) * sample_rate)
+                    # Convert the saved start time back to an absolute sample index using t0_sample_index
+                    clicked_onset_sample = t0_sample_index + int((state['temp_start_time_ms'] / 1000.0) * sample_rate)
                     end_sample = clicked_sample
                     
                     if end_sample > clicked_onset_sample:
@@ -829,18 +1066,21 @@ def main():
                         state['gate_start_idx'] = true_start_sample
                         state['gate_idx'] = end_sample
                         
-                        actual_start_ms = (true_start_sample / sample_rate) * 1000.0
+                        # Convert absolute sample indices back to the new shifted time axis (in ms)
+                        actual_start_ms = ((true_start_sample - t0_sample_index) / sample_rate) * 1000.0
                         clicked_onset_ms = state['temp_start_time_ms']
-                        actual_end_ms = (end_sample / sample_rate) * 1000.0
+                        actual_end_ms = ((end_sample - t0_sample_index) / sample_rate) * 1000.0
                         
+                        print(f"   The end of the window was placed at: {clicked_time_ms:.2f} ms.\n")
                         print(f"Window Updated!")
-                        print(f"  - Taper starts at: {actual_start_ms:.2f} ms")
-                        print(f"  - Taper ends (Signal Onset): {clicked_onset_ms:.2f} ms")
-                        print(f"  - Window ends: {actual_end_ms:.2f} ms")
+                        print(f"  - Window starts at: {actual_start_ms:.2f} ms")
+                        print(f"  - Window ends at: {actual_end_ms:.2f} ms")
+                        print(f"  - Time Resolution for this window: {1000.0/(actual_end_ms-actual_start_ms):.3g} Hz\n")
                         
                         start_line.set_xdata([actual_start_ms, actual_start_ms])
                         gate_line.set_xdata([actual_end_ms, actual_end_ms])
                         update_tukey_visual()
+                        state['user_has_set_gate'] = True
                     else:
                         print("Error: Window end must be after the window start. Try again.")
                     
@@ -853,10 +1093,21 @@ def main():
 
     def handle_gate_button(event):
         if state['selecting_gate_step'] == 0:
+            if state['user_has_set_gate'] == False:
+                #first time to click on the Place Gate tool, so give instructions via a pop-up
+                user_message = "Follow these steps to set the window:\n"
+                user_message += "Click on the time plot "
+                user_message += "where the impulse first leaves the baseline. Then "
+                user_message += "click again at a later time point to set the end "
+                user_message += "time for the Tukey window. Adjust the Tukey alpha "
+                user_message += "parameter to change the width of the tapers. This "
+                user_message += "message will not be shown again."
+                show_notification("INSTRUCTIONS", user_message)
             state['selecting_gate_step'] = 1
             btn_gate.label.set_color('red')
             ax_btn_gate.set_facecolor('#ffcccc')
-            print("Step 1/2: Click the time plot where the signal leaves the baseline (Start taper end).")
+            print("Setting a new time domain window:")
+            print("Step 1 of 2: Click on the time plot where the impulse first leaves the baseline...")
         else:
             state['selecting_gate_step'] = 0
             btn_gate.label.set_color('black')
@@ -871,22 +1122,101 @@ def main():
         current_sel = state['selected_harmonic']
         current_phase = state['showing_phase']
 
+        results = state['smoothed_harmonic_results']
+        sel = current_sel
+        
         # 1. Capture current X-axis limit (to preserve frequency zoom across views)
         try:
             old_xlim = ax_freq.get_xlim()
         except Exception:
             old_xlim = None
 
-        # 2. Clear and set up base properties
+        # Clear the axis and set up grid / scale
         ax_freq.clear()
         ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
         ax_freq.set_xscale('log')
-        ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
 
-        results = state['smoothed_harmonic_results']
-        sel = current_sel
+        # 2. Extract data and mask out NaNs from mag_db to get valid x-values for xmax
+        freqs = np.array(results[1]['freqs'])
+        mag_db = np.array(results[1]['mag_db'])
+
+        valid_mask = ~np.isnan(mag_db)
+        x_masked = freqs[valid_mask]
+        xmax = max(x_masked)
+        xmax = min(xmax, state['HF_window_startF'])
+
+        # 3. Get the minimum resolution frequency from state & generate master ticks
+        res_min = state["resolution"]
+
+        start_decade = int(np.floor(np.log10(res_min))) - 1
+        end_decade = int(np.ceil(np.log10(xmax)))
+        decades = np.arange(start_decade, end_decade + 1)
+
+        multipliers = [1, 2, 3, 5]
+        master_ticks = []
+        for d in decades:
+            for m in multipliers:
+                master_ticks.append(m * (10 ** d))
+
+        # Lower bound: largest master tick <= res_min (tick just below data start)
+        valid_lower_ticks = [t for t in master_ticks if t <= res_min]
+        xmin_temp = max(valid_lower_ticks) if valid_lower_ticks else res_min
+
+        # Upper bound: smallest master tick >= xmax (next tick *above* last data point)
+        valid_upper_ticks = [t for t in master_ticks if t >= xmax]
+        xmax_temp = min(valid_upper_ticks) if valid_upper_ticks else xmax
+
+        # Filter active ticks inclusively between the lower and upper buffer ticks
+        active_ticks = [t for t in master_ticks if xmin_temp <= t <= xmax_temp]
+
+        # 4. Apply custom ticks and formatting first
+        ax_freq.set_xticks(active_ticks)
         
-        # 1. Define k_idx so it is available for BOTH phase and magnitude views
+        # Major ticks: Use smart 'k' formatting for thousands, standard numbers below
+        def freq_formatter(x, pos):
+            if x >= 1000:
+                return f"{int(x // 1000)}k" if x % 1000 == 0 else f"{x / 1000:g}k"
+            else:
+                return f"{int(x) if x == int(x) else x}"
+                
+        ax_freq.xaxis.set_major_formatter(ticker.FuncFormatter(freq_formatter))
+        
+        # Define a smart dynamic formatter for minor ticks
+        def smart_minor_formatter(x, pos):
+            xlim = ax_freq.get_xlim()
+            if xlim[0] > 0 and xlim[1] > 0:
+                span_decades = np.log10(xlim[1] / xlim[0])
+            else:
+                span_decades = 3.0  
+            
+            if span_decades > 1.5:
+                return ""
+            
+            # Apply 'k' formatting to minor ticks too if they exceed 1000
+            if x >= 1000:
+                return f"{int(x // 1000)}k" if x % 1000 == 0 else f"{x / 1000:g}k"
+            else:
+                return f"{x:g}"
+
+        ax_freq.xaxis.set_minor_formatter(ticker.FuncFormatter(smart_minor_formatter))
+        ax_freq.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
+
+        # 5. Handle X-axis limits (preserve user zoom or snap neatly to custom ticks)
+        is_default_limit = (not old_xlim) or (old_xlim == (0.0, 1.0)) or (abs(old_xlim[0] - 20.0) < 0.1 and abs(old_xlim[1] - 20000.0) < 1.0)
+
+        if not is_default_limit:
+            # User has actively zoomed in! Respect their zoom range.
+            ax_freq.set_xlim(old_xlim)
+        else:
+            # Default state: Snap to your custom active ticks range
+            if active_ticks:
+                xmin_val = float(active_ticks[0])
+                xmax_val = float(active_ticks[-1])
+                ax_freq.set_xlim(xmin_val, xmax_val)
+            else:
+                ax_freq.set_xlim(20.0, 20000.0)
+
+        # Define k_idx so it is available for BOTH phase and magnitude views
         k_idx = int(sel[1:]) if len(sel) > 1 and sel[1:].isdigit() else 1
 
         if current_phase:
@@ -913,10 +1243,10 @@ def main():
                 freqs = results[1]['freqs']
                 line1, = ax_freq.plot(freqs, results[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
                 lines = [line1]
-                colors = ['blue', 'tomato', 'green', 'black', 'aqua']
+                colors = ['blue', 'tomato', 'green', 'black', 'aqua', 'blueviolet', 'peru', 'deeppink']
                 for idx, k in enumerate(range(2, state['hd_max'] + 1)):
                     if k in results:
-                        l, = ax_freq.plot(results[k]['freqs'], results[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='--', label=f'H{k}')
+                        l, = ax_freq.plot(results[k]['freqs'], results[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='-', label=f'H{k}')
                         lines.append(l)
                 ax_freq.legend(loc='lower right', framealpha=1.0, facecolor='white', edgecolor='black')
                 ax_freq.set_ylabel(mag_ylabel)
@@ -924,21 +1254,28 @@ def main():
                 state['freq_line_plot'] = lines
             elif sel == 'THD':
                 freqs = results[1]['freqs']
-                line, = ax_freq.plot(freqs, results['thd_percent'], color='blue', lw=1.2)
+                thd_data = results['thd_percent']
+                line, = ax_freq.plot(freqs, thd_data, color='blue', lw=1.2)
+                
+                # Set the plot y-axis minimum to zero 
+                ax_freq.set_ylim(bottom=0)
+                
+                valid_max = np.nanmax(thd_data) if not np.isnan(thd_data).all() else 10.0
+                upper_limit = max( min(10.0, valid_max), 1.0)
+                
+                ax_freq.set_ylim(top=upper_limit)
+                
                 ax_freq.set_ylabel("THD (%)")
                 ax_freq.set_title("Total Harmonic Distortion (THD)")
                 state['freq_line_plot'] = [line]
             else:
                 if k_idx <= state['hd_max']:
-                    # Compute relative level (dB relative to H1) for H2, H3, etc.
                     if k_idx > 1 and 1 in results:
-                        # Optional: Use np.interp if array shapes ever mismatch, otherwise direct subtraction:
                         h1_interp = np.interp(results[k_idx]['freqs'], results[1]['freqs'], results[1]['mag_db'])
                         mag_data = results[k_idx]['mag_db'] - h1_interp
                         ylabel_str = "Level Relative to H1 (dB)"
                         title_str = f"Harmonic {k_idx} - Magnitude Relative to Fundamental"
                     else:
-                        # H1 stays absolute
                         mag_data = results[k_idx]['mag_db']
                         ylabel_str = mag_ylabel
                         title_str = f"Frequency Domain Data - Magnitude (Harmonic {k_idx})"
@@ -950,64 +1287,106 @@ def main():
 
             ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
 
-        # 3. Handle X-axis limits (preserve frequency zoom)
-        if old_xlim and old_xlim != (0.0, 1.0):
-            ax_freq.set_xlim(old_xlim)
-        else:
-            ax_freq.set_xlim(20, sample_rate / 2.0)
-
-        # 4. Standard auto-scale Y limits for the active view
-        ax_freq.relim()
-        ax_freq.autoscale_view(scalex=False, scaley=True)
-
-        # 5. Refresh canvas
+        # 6. Refresh canvas
         fig.canvas.draw_idle()
 
     def handle_calc_button(event):
+        if state['user_has_set_gate'] == False:
+            user_message = "You must place the start and end gates to define the window "
+            user_message += "at least once before calculating the results. Click on the "
+            user_message += "Place Gate button. Click on the time plot to place the gate points."
+            print(user_message)
+            show_notification("Error", user_message)
+            return
+            
         if state['smoothed_harmonic_results'] is not None:
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
             ax_freq.set_xscale('log')
-            ax_freq.set_xlim(20, sample_rate / 2.0)
-            ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
             ax_freq.set_ylabel(mag_ylabel)
             ax_freq.set_title("Frequency Domain Data (Cleared)")
             ax_freq.set_xlabel('Frequency (Hz)')
+
+            # Set up initial x-axis:
+            ax_freq.set_xlim(20, 20000)
+            
+            # Define initial custom frequency ticks
+            custom_ticks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
+            ax_freq.set_xticks(custom_ticks)
+            
+            # Custom frequency formatter for clean labels (e.g., 1k, 10k, 20k)
+            def freq_formatter(x, pos):
+                if x >= 1000:
+                    return f"{int(x // 1000)}k" if x % 1000 == 0 else f"{x / 1000:g}k"
+                else:
+                    return f"{int(x) if x == int(x) else x}"
+                    
+            ax_freq.xaxis.set_major_formatter(ticker.FuncFormatter(freq_formatter))
+            
+            # Optional: Clean minor ticks handled automatically
+            ax_freq.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
+
             fig.canvas.draw_idle()
             state['smoothed_harmonic_results'] = None
             state['resolution'] = None
-            print("Lower plot cleared. All calculated data cleared.")
+            print("All calculated data cleared.\n")
         else:
             print(f"Computing Farina Method response up to HD {state['hd_max']}...")
-            
-            linear_peak_idx = np.argmax(np.abs(full_ir))
-            gate_start_offset = state['gate_start_idx'] - linear_peak_idx
-            gate_end_offset = state['gate_idx'] - linear_peak_idx
             
             results = run_farina_analysis(
                 recorded_audio=mic_data,
                 sample_rate=sample_rate,
                 inv_filter=inv_filter,
-                start_freq=args.start_f,
-                gate_start_offset=gate_start_offset,
-                gate_end_offset=gate_end_offset,
+                start_freq=measurement_start_freq,
+                max_valid_freq=HF_window_startF,
+                Fgrid_density=state['smoothing_octaves'],
+                gate_start_idx=state['gate_start_idx'],
+                gate_end_idx=state['gate_idx'],
+                timezero_sample_idx=t0_sample_index,
                 tukey_alpha=state['tukey_alpha'],
-                mic_cal_file=args.mic_cal,
-                mic_sensitivity=args.mic_sensitivity,
-                v_stimulus=args.v_stimulus,
-                distance=args.distance,
                 max_harmonic=state['hd_max']
             )
-            state['raw_harmonic_results'] = results
             
-            octave_smoothing = 12
-            state['smoothed_harmonic_results'] = generate_smoothed_results(results, octave_smoothing)
+            # Apply SPL corrections:
+            mic_cal_file = getattr(args, 'mic_cal_file', None)
+            K = getattr(args, 'spl_correction_factor', None)
+
+            # Convert the linear system factor K into a decibel offset
+            if K is not None and K > 0:
+                spl_offset_db = 20 * np.log10(K)
+            else:
+                spl_offset_db = 0.0
+
+            # Loop through all k harmonics stored in the dictionary
+            for k, harmonic_data in results.items():
+                # Skip top-level summary keys (like 'freqs', 'thd_percent', etc.)
+                if not isinstance(k, int):
+                    continue
+                    
+                freqs = harmonic_data['freqs']
+                
+                # Ensure mag_db is treated as a NumPy array so math operations work safely
+                mag_db = np.asarray(harmonic_data['mag_db'], dtype=float)
+                
+                # 1. Apply the system SPL correction factor
+                mag_db += spl_offset_db
+                
+                # 2. Apply the microphone calibration corrections if a file was provided
+                if mic_cal_file is not None:
+                    cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
+                    mag_db -= np.asarray(cal_corrections, dtype=float)
+                    
+                # Update the dictionary with the fully calibrated magnitude data
+                harmonic_data['mag_db'] = mag_db            
+            
+            #store the results in the state variable
+            state['smoothed_harmonic_results'] = results
             
             window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
             state['resolution'] = 1.0 / window_duration
-            
+
             refresh_frequency_plot()
-            print(f"Analysis complete! Resolution: {state['resolution']:.3g} Hz")
+            print(f"The Farina analysis has completed and new data is available.\n")
 
             # --- FIX THE HOME BUTTON STACK HERE ---
             toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
@@ -1027,6 +1406,17 @@ def main():
             state['showing_phase'] = not state['showing_phase']
             refresh_frequency_plot()
             update_phase_indicator()
+            
+            # Reset toolbar nav stack for the new view
+            toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
+            if toolbar is not None:
+                if hasattr(toolbar, '_views'):
+                    toolbar._views.clear()
+                    toolbar._positions.clear()
+                    toolbar.push_current()
+                elif hasattr(toolbar, '_nav_stack'):
+                    toolbar._nav_stack.clear()
+                    toolbar.push_current()
         else:
             print("No frequency data computed yet. Click 'Compute/Clear' first.")
 
@@ -1049,8 +1439,25 @@ def main():
         new_idx = (curr_idx - 1) % len(h_list)
         state['selected_harmonic'] = h_list[new_idx]
         textbox_dataset.set_val(state['selected_harmonic'])
+        
+        # If user cycles into ALL or THD while in phase view, automatically switch back to magnitude view
+        if state['selected_harmonic'] in ('ALL', 'THD') and state['showing_phase']:
+            state['showing_phase'] = False
+            print("Note: Phase view is not available for ALL or THD. Switched back to Magnitude view.")
+
         if state['smoothed_harmonic_results'] is not None:
             refresh_frequency_plot()
+            
+            # Reset toolbar nav stack so "Back" doesn't jump to previous harmonics
+            toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
+            if toolbar is not None:
+                if hasattr(toolbar, '_views'):
+                    toolbar._views.clear()
+                    toolbar._positions.clear()
+                    toolbar.push_current()
+                elif hasattr(toolbar, '_nav_stack'):
+                    toolbar._nav_stack.clear()
+                    toolbar.push_current()
 
     def handle_cycle_right(event):
         h_list = get_harmonic_list()
@@ -1061,41 +1468,43 @@ def main():
         new_idx = (curr_idx + 1) % len(h_list)
         state['selected_harmonic'] = h_list[new_idx]
         textbox_dataset.set_val(state['selected_harmonic'])
+        
+        # If user cycles into ALL or THD while in phase view, automatically switch back to magnitude view
+        if state['selected_harmonic'] in ('ALL', 'THD') and state['showing_phase']:
+            state['showing_phase'] = False
+            print("Note: Phase view is not available for ALL or THD. Switched back to Magnitude view.")
+
         if state['smoothed_harmonic_results'] is not None:
             refresh_frequency_plot()
+            
+            # Reset toolbar nav stack so "Back" doesn't jump to previous harmonics
+            toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
+            if toolbar is not None:
+                if hasattr(toolbar, '_views'):
+                    toolbar._views.clear()
+                    toolbar._positions.clear()
+                    toolbar.push_current()
+                elif hasattr(toolbar, '_nav_stack'):
+                    toolbar._nav_stack.clear()
+                    toolbar.push_current()
 
     def handle_save_exit_button(event):
         if state['smoothed_harmonic_results'] is None:
-            print("Computing response before saving...")
+            print("WARNING: There is no data to save. Run the calculation first before saving.")
+            return
             
-            linear_peak_idx = np.argmax(np.abs(full_ir))
-            gate_start_offset = state['gate_start_idx'] - linear_peak_idx
-            gate_end_offset = state['gate_idx'] - linear_peak_idx
+        # Ensure the destination directory exists if base_name includes a path
+        import os
+        save_dir = os.path.dirname(args.basename)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
             
-            results = run_farina_analysis(
-                recorded_audio=mic_data,
-                sample_rate=sample_rate,
-                inv_filter=inv_filter,
-                start_freq=args.start_f,
-                gate_start_offset=gate_start_offset,
-                gate_end_offset=gate_end_offset,
-                tukey_alpha=state['tukey_alpha'],
-                mic_cal_file=args.mic_cal,
-                mic_sensitivity=args.mic_sensitivity,
-                v_stimulus=args.v_stimulus,
-                distance=args.distance,
-                max_harmonic=state['hd_max']
-            )
-            state['raw_harmonic_results'] = results
-            
-            octave_smoothing = 12
-            state['smoothed_harmonic_results'] = generate_smoothed_results(results, octave_smoothing)
-             
-            window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
-            state['resolution'] = 1.0 / window_duration
-
+        if state['using_min_phase']:
+            print(f"Saving FRD data files (minimum phase response)...")
+        else:
+            print(f"Saving FRD data files...")
         res = state['smoothed_harmonic_results']
-        base_name = args.output  
+        base_name = args.basename  
         
         for k in range(1, state['hd_max'] + 1):
             if k in res:
@@ -1104,66 +1513,118 @@ def main():
                 filename_k = f"{base_name}_HD{k}.frd"
                 write_frd_file(filename_k, h_data['freqs'], h_data['mag_db'], phase_to_save)
 
-        print("Saving plots at 600 DPI in png file format...")
+        print("\nSaving plots at 600 DPI in png file format...")
         
+        # Dynamically compute active ticks matching the on-screen UI safely
+        freqs = np.array(res[1]['freqs'])
+        mag_db = np.array(res[1]['mag_db'])
+        valid_mask = ~np.isnan(mag_db)
+        x_masked = freqs[valid_mask]
+        xmax = max(x_masked) if len(x_masked) > 0 else 20000.0
+        
+        res_min = state.get("resolution")
+        if res_min is None or res_min <= 0:
+            res_min = 20.0
+            
+        try:
+            start_decade = int(np.floor(np.log10(res_min))) - 1
+            end_decade = int(np.ceil(np.log10(xmax))) + 1  # Headroom for upper bound
+            decades = np.arange(start_decade, end_decade + 1)
+            
+            # Use multipliers including 3 to catch 30k instead of jumping to 50k
+            multipliers = [1, 2, 3, 5]
+            master_ticks = []
+            for d in decades:
+                for m in multipliers:
+                    t = m * (10 ** d)
+                    if t > 0:
+                        master_ticks.append(t)
+                        
+            # Lower bound: largest master tick <= res_min
+            valid_lower_ticks = [t for t in master_ticks if t <= res_min]
+            xmin_temp = max(valid_lower_ticks) if valid_lower_ticks else res_min
+            
+            # Upper bound: smallest master tick >= xmax (prevents data clipping)
+            valid_upper_ticks = [t for t in master_ticks if t >= xmax]
+            xmax_temp = min(valid_upper_ticks) if valid_upper_ticks else xmax
+            
+            active_ticks = [t for t in master_ticks if xmin_temp <= t <= xmax_temp]
+        except Exception:
+            active_ticks = [20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 20000, 30000]
+
+        def apply_custom_scaling_and_ticks(ax):
+            ax.set_xscale('log')
+            ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+            
+            # Ensure all ticks are strictly positive for log scale
+            positive_ticks = [t for t in active_ticks if t > 0]
+            if positive_ticks:
+                ax.set_xticks(positive_ticks)
+                ax.set_xlim(float(positive_ticks[0]), float(positive_ticks[-1]))
+            else:
+                ax.set_xlim(20.0, 20000.0)
+                
+            # Custom frequency formatter for clean labels (e.g., 1k, 10k, 30k)
+            def freq_formatter(x, pos):
+                if x >= 1000:
+                    return f"{int(x // 1000)}k" if x % 1000 == 0 else f"{x / 1000:g}k"
+                else:
+                    return f"{int(x) if x == int(x) else x}"
+
+            ax.xaxis.set_major_formatter(ticker.FuncFormatter(freq_formatter))
+            ax.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
+
         # Plot A: Fundamental Magnitude (_FREQ.png)
-        fig_freq, ax_f = plt.subplots(figsize=(8, 5))
+        fig_freq, ax_f = plt.subplots(figsize=(11, 5))
         ax_f.plot(res[1]['freqs'], res[1]['mag_db'], color='r', lw=1.2)
         ax_f.set_title("Fundamental Frequency Response - Magnitude")
         ax_f.set_xlabel("Frequency (Hz)")
         ax_f.set_ylabel(mag_ylabel)
-        ax_f.set_xscale('log')
-        ax_f.set_xlim(20, sample_rate / 2.0)
-        ax_f.grid(True, which='both', linestyle='--', linewidth=0.5)
+        apply_custom_scaling_and_ticks(ax_f)
         fig_freq.savefig(f"{base_name}_FREQ.png", dpi=600, bbox_inches='tight')
         plt.close(fig_freq)
 
         # Plot B: Fundamental Phase (_PHASE.png)
-        fig_phase, ax_p = plt.subplots(figsize=(8, 5))
-        phase_to_plot = res[1]['min_phase'] if state['using_min_phase'] else res[1]['phase']
-        phase_title = "Fundamental Minimum Phase" if state['using_min_phase'] else "Fundamental Phase"
+        fig_phase, ax_p = plt.subplots(figsize=(11, 5))
+        phase_raw = res[1]['min_phase'] if state['using_min_phase'] else res[1]['phase']
+        phase_to_plot = np.rad2deg(np.angle(np.exp(1j * np.deg2rad(phase_raw))))
+        phase_title = "Fundamental Minimum Phase (Wrapped)" if state['using_min_phase'] else "Fundamental Phase (Wrapped)"
         ax_p.plot(res[1]['freqs'], phase_to_plot, color='g', lw=1.2)
         ax_p.set_title(phase_title)
-        ax_p.set_xlabel("Frequency (Hz)")
+        ax_p.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
         ax_p.set_ylabel("Phase (degrees)")
-        ax_p.set_xscale('log')
-        ax_p.set_xlim(20, sample_rate / 2.0)
-        ax_p.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax_p.set_ylim(-180, 180)
+        ax_p.set_yticks([-180, -90, 0, 90, 180])
+        apply_custom_scaling_and_ticks(ax_p)
         fig_phase.savefig(f"{base_name}_PHASE.png", dpi=600, bbox_inches='tight')
         plt.close(fig_phase)
 
         # Plot C: All Harmonics Magnitude (_HD.png)
-        fig_hd, ax_h = plt.subplots(figsize=(8, 5))
-        freqs = res[1]['freqs']
+        fig_hd, ax_h = plt.subplots(figsize=(11, 5))
         ax_h.plot(freqs, res[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
-        colors = ['orange', 'purple', 'brown', 'pink', 'gray']
+        colors = ['blue', 'tomato', 'green', 'black', 'aqua', 'blueviolet', 'peru', 'deeppink']
         for idx, k in enumerate(range(2, state['hd_max'] + 1)):
             if k in res:
-                ax_h.plot(res[k]['freqs'], res[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='--', label=f'H{k}')
-        ax_h.legend(loc='upper right')
+                ax_h.plot(res[k]['freqs'], res[k]['mag_db'], color=colors[idx % len(colors)], lw=1.0, linestyle='-', label=f'H{k}')
+        ax_h.legend(loc='lower right', framealpha=1.0, facecolor='white', edgecolor='black')
         ax_h.set_title("Harmonic Distortion - All Harmonics")
-        ax_h.set_xlabel("Frequency (Hz)")
+        ax_h.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
         ax_h.set_ylabel(mag_ylabel)
-        ax_h.set_xscale('log')
-        ax_h.set_xlim(20, sample_rate / 2.0)
-        ax_h.grid(True, which='both', linestyle='--', linewidth=0.5)
+        apply_custom_scaling_and_ticks(ax_h)
         fig_hd.savefig(f"{base_name}_HD.png", dpi=600, bbox_inches='tight')
         plt.close(fig_hd)
 
         # Plot D: Total Harmonic Distortion (_THD.png)
-        fig_thd, ax_t = plt.subplots(figsize=(8, 5))
+        fig_thd, ax_t = plt.subplots(figsize=(11, 5))
         ax_t.plot(res[1]['freqs'], res['thd_percent'], color='blue', lw=1.2)
         ax_t.set_title("Total Harmonic Distortion (THD)")
         ax_t.set_xlabel("Frequency (Hz)")
         ax_t.set_ylabel("THD (%)")
-        ax_t.set_xscale('log')
-        ax_t.set_xlim(20, sample_rate / 2.0)
-        ax_t.grid(True, which='both', linestyle='--', linewidth=0.5)
+        apply_custom_scaling_and_ticks(ax_t)
         fig_thd.savefig(f"{base_name}_THD.png", dpi=600, bbox_inches='tight')
         plt.close(fig_thd)
 
-        print("All data files and plots successfully saved.")
-        print("Closing application.")
+        print("\nCompleted all EXIT related actions. Now closing the application.")
         plt.close('all')
         sys.exit(0)
 
@@ -1202,4 +1663,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-    
+
