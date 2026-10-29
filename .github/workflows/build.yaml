@@ -68,8 +68,8 @@ jobs:
           Copy-Item "build/Release/DaDooRunRun.exe" "dist/Windows-programs/"
           Copy-Item "build/Release/ProbeAudioDevs.exe" "dist/Windows-programs/"
           
-          # Copy portaudio.dll from vcpkg's installed bin directory
-          Copy-Item "build/vcpkg_installed/x64-windows/bin/portaudio.dll" "dist/Windows-programs/"
+          # Copy portaudio.dll from the global vcpkg installation path
+          Copy-Item "C:/vcpkg/installed/x64-windows/bin/portaudio.dll" "dist/Windows-programs/"
           
           # Create the zip archive
           Compress-Archive -Path "dist/Windows-programs/*" -DestinationPath "dist/Windows-programs.zip"
