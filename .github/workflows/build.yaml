@@ -21,24 +21,39 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # --- Linux Setup & Build ---
       - name: Install Dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential pkg-config libportaudio2 portaudio19-dev libeigen3-dev
+          sudo apt-get install -y cmake build-essential pkg-config libportaudio2 portaudio19-dev
 
       - name: Configure CMake (Ubuntu)
         if: matrix.os == 'ubuntu-24.04'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
+      # --- Windows Setup, Caching & Build ---
+      - name: Cache vcpkg Windows Binaries
+        if: matrix.os == 'windows-latest'
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:/vcpkg/installed
+            C:/vcpkg/packages
+            C:/vcpkg/buildtrees
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-
+
       - name: Install Dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          vcpkg install portaudio[asio]:x64-windows eigen3:x64-windows
+          vcpkg install portaudio[asio]:x64-windows
 
       - name: Configure CMake (Windows)
         if: matrix.os == 'windows-latest'
         run: cmake -B build --fresh -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
+
       - name: Build Project
         run: cmake --build build --config Release
 
