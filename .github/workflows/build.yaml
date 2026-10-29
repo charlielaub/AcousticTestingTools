@@ -79,16 +79,21 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: |
           mkdir -p dist/Linux-programs
-          cp build/DaDooRunRun dist/Linux-programs/
-          cp build/ProbeAudioDevs dist/Linux-programs/
-          cd dist && tar -czvf Linux-programs.tar.gz Linux-programs
+          
+          # Verify and copy executables with fallback/error reporting
+          if [ -f "build/DaDooRunRun" ]; then
+            cp build/DaDooRunRun dist/Linux-programs/
+          else
+            echo "Error: DaDooRunRun binary not found in build/"
+            exit 1
+          fi
 
-      # --- Upload Platform-Specific Archives ---
-      - name: Upload Binaries to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/Windows-programs.zip
-            dist/Linux-programs.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if [ -f "build/ProbeAudioDevs" ]; then
+            cp build/ProbeAudioDevs dist/Linux-programs/
+          else
+            echo "Error: ProbeAudioDevs binary not found in build/"
+            exit 1
+          fi
+
+          # Create the tar.gz archive
+          cd dist && tar -czvf Linux-programs.tar.gz Linux-programs
