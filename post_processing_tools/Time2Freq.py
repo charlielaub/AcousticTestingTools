@@ -17,6 +17,7 @@ import os
 import sys
 import numpy as np
 import scipy.signal
+from scipy import signal
 from scipy.io import wavfile as wav
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox, RadioButtons
@@ -61,7 +62,7 @@ def parse_arguments():
     )
     parser.add_argument("-k","--spl_correction_factor", 
             type=float, 
-            default=None,
+            default=1.0,
             help="Lumped SPL correction factor."
     )
     return parser.parse_args()
@@ -69,152 +70,8 @@ def parse_arguments():
 
 
 
-def compute_frequency_response(
-    audio_data,
-    sample_rate,
-    gate_end_idx,
-    tukey_alpha
-):
-    """
-    Applies a Tukey window, computes a standardized normalized FFT, and returns
-    frequencies, calibrated magnitude (dBSPL), phase vectors, and delta frequency.
-    """
-    gate_end_idx = max(10, min(gate_end_idx, len(audio_data)))
-
-    # Apply Tukey window locally to the active segment
-    win = scipy.signal.get_window(('tukey', tukey_alpha), gate_end_idx)
-    windowed_data = audio_data[:gate_end_idx].astype(np.float32) * win
-
-    # Determine optimal power-of-2 FFT length
-    desired_len = max(2048, 2 * len(windowed_data))
-    n_fft = 1 << math.ceil(math.log2(desired_len))
-
-    # Standard real FFT execution
-    fft_result = np.fft.rfft(windowed_data, n=n_fft)
-    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
-
-    mag = np.abs(fft_result)
-
-    # Coherent gain normalization for the windowed signal
-    window_sum = np.sum(win)
-    if window_sum > 0:
-        # Correct scaling for real FFT (rfft) preserving physical peak amplitude
-        mag_normalized = mag / (window_sum / 2.0)
-    else:
-        mag_normalized = mag
-
-    mag_db = 20.0 * np.log10(np.maximum(mag_normalized, 1e-12))
-    
-    phase_deg = np.angle(fft_result, deg=True)
-
-    # Compute Minimum Phase response on the active windowed data
-    try:
-        min_phase_signal = scipy.signal.minimum_phase(
-            windowed_data, method='homomorphic', half=False
-        )
-        min_fft_result = np.fft.rfft(min_phase_signal, n=n_fft)
-        min_phase_deg = np.angle(min_fft_result, deg=True)
-    except Exception:
-        min_phase_deg = phase_deg.copy()
-
-    delta_frequency = float(sample_rate / n_fft)
-    valid_idx = freqs <= (sample_rate / 2.0)
-    
-    return (
-        freqs[valid_idx],
-        mag_db[valid_idx],
-        phase_deg[valid_idx],
-        min_phase_deg[valid_idx],
-        delta_frequency,
-        fft_result[valid_idx] # Also pass raw complex spectrum out for post-rotation phase fixes
-    )
-
-
-
-
-
-def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq, gate_start_idx, gate_end_idx, max_harmonic=5):
-    """
-    Checks if the given window length causes overlapping windows between 
-    adjacent harmonics in a Farina method impulse response.
-    """
-    duration = len(inv_filter) / sample_rate
-    nyquist = 0.5 * sample_rate
-    end_freq = 0.99 * nyquist
-    ln_ratio = np.log(end_freq / start_freq)
-    
-    linear_peak_idx = np.argmax(np.abs(full_ir))
-    peak_indices = {}
-    
-    # 1. Calculate peak indices for all harmonics
-    for k in range(1, max_harmonic + 1):
-        if k == 1:
-            sample_offset = 0
-        else:
-            delta_t = (duration / ln_ratio) * np.log(k)
-            sample_offset = int(round(delta_t * sample_rate))
-        
-        peak_indices[k] = linear_peak_idx - sample_offset
-        
-    # 2. Initialize overlap tracking array
-    overlaps = np.zeros(max_harmonic + 1, dtype=int)
-    warnings_list = []
-    
-    # Calculate the actual active window length from user gates
-    window_len = gate_end_idx - gate_start_idx
-    
-    # 3. Check for overlaps between adjacent harmonics
-    for k in range(2, max_harmonic + 1):
-        current_peak = peak_indices[k]
-        
-        # Correct window end relative to each harmonic's unique peak
-        # (Assuming the window spans from gate_start_idx relative offset to window_len)
-        window_end_sample = current_peak + window_len
-        prev_peak = peak_indices[k - 1] # The lower-order harmonic to its right
-        
-        if window_end_sample > prev_peak:
-            overlap_samples = window_end_sample - prev_peak
-            overlaps[k] = overlap_samples
-            warnings_list.append(
-                f"Overlap Warning: Harmonic {k} window extends past the peak of "
-                f"Harmonic {k-1} by {overlap_samples} samples."
-            )
-        else:
-            overlaps[k] = 0
-            
-    # 4. Append a single recommendation at the end if warnings were found
-    if warnings_list:
-        warnings_list.append(
-            "Recommendation: Consider reducing the window length or increasing the sweep duration."
-        )
-        
-    return peak_indices, warnings_list, overlaps
-
-
-
-def extract_harmonic_segment(full_ir, sample_rate, duration, start_freq, end_freq, timezero_sample_idx, n):
-    """
-    Extracts the Nth harmonic segment using Teemu Ikonen's midpoint-boundary method 
-    and returns both the segment and its starting index, anchored to timezero_sample_idx.
-    """
-    order_t1 = n + 0.5
-    order_t2 = (n - 1) + 0.5 if n > 1 else 1.5
-    
-    t1 = -duration * np.log(order_t1) / np.log(end_freq / start_freq)
-    t2 = -duration * np.log(order_t2) / np.log(end_freq / start_freq)
-    
-    start_idx = timezero_sample_idx + int(round(t1 * sample_rate))
-    end_idx = timezero_sample_idx + int(round(t2 * sample_rate))
-    
-    start_idx, end_idx = min(start_idx, end_idx), max(start_idx, end_idx)
-    start_idx = max(0, min(start_idx, len(full_ir)))
-    end_idx = max(0, min(end_idx, len(full_ir)))
-    
-    segment = full_ir[start_idx:end_idx]
-    return segment, start_idx
-
-
-
+import numpy as np
+from scipy import signal
 
 def run_farina_analysis(
     recorded_audio,
@@ -230,11 +87,11 @@ def run_farina_analysis(
     max_harmonic=5
 ):
     """
-    function run_farina_analysis:
     Uses the Farina method to extract linear and nonlinear distortion 
     responses from a recorded exponential sine sweep, supporting either 
     a raw linear frequency grid (when Fgrid_density = 0) or a logarithmic 
-    energy-averaged grid on Fgrid_density frequencies per octave.
+    energy-averaged grid on Fgrid_density frequencies per octave, with 
+    harmonic time-compression and amplitude scaling corrections.
 
     Parameters:
     -----------
@@ -265,172 +122,250 @@ def run_farina_analysis(
     --------
     dict
         A dictionary containing frequency response data, phase, 
-        minimum phase, and THD percentage.
-    """ 
-    duration = len(inv_filter) / sample_rate
-    nyquist = 0.5 * sample_rate
-
-    # 1. Perform Fast Deconvolution
-    full_ir = scipy.signal.fftconvolve(recorded_audio, inv_filter, mode='full')
-
-    # Calculate active window length based on absolute indices
-    window_len = gate_end_idx - gate_start_idx
-    
-    peak_indices, warnings_list, overlaps = check_harmonic_window_overlaps(
-        full_ir=full_ir,
-        inv_filter=inv_filter,
-        sample_rate=sample_rate,
-        start_freq=start_freq,
-        gate_start_idx=gate_start_idx,
-        gate_end_idx=gate_end_idx,
-        max_harmonic=max_harmonic
-    )
-
-    if warnings_list:
-        print("Farina Harmonic Window Warning:")
-        for warning in warnings_list:
-            print(f"  -> {warning}")
-
+        minimum phase, and delta frequency formatted per harmonic order.
+    """
+    # 1. Deconvolve recorded audio with the inverse filter
+    impulse_full = signal.fftconvolve(recorded_audio, inv_filter, mode='full')
+    sweep_len = len(inv_filter)
     harmonic_results = {}
+    
+    # 2. Pre-calculate logarithmic frequency grid if requested
+    if Fgrid_density > 0:
+        octaves = np.log2(max_valid_freq / start_freq)
+        num_points = int(np.ceil(octaves * Fgrid_density))
+        log_freqs = start_freq * (2.0 ** (np.arange(num_points) / Fgrid_density))
+        log_freqs = log_freqs[log_freqs <= max_valid_freq]
 
-    # 2. Extract and process each harmonic cleanly
+    # Find the true absolute peak of the fundamental impulse 
+    # (Constrain search near the provided timezero to avoid random noise spikes)
+    search_start = max(0, timezero_sample_idx - int(sample_rate * 0.1))
+    search_end = min(len(impulse_full), timezero_sample_idx + int(sample_rate * 0.1))
+    main_peak_idx = search_start + np.argmax(np.abs(impulse_full[search_start:search_end]))
+
+    # Helper function to calculate exact sample shift for any harmonic k
+    def get_shift(k_order):
+        if k_order <= 1: return 0
+        return int(np.round((sweep_len / np.log(max_valid_freq / start_freq)) * np.log(k_order)))
+
+    # 3. Loop through each harmonic order
     for k in range(1, max_harmonic + 1):
+        shift_samples = get_shift(k)
+        harmonic_peak_idx = main_peak_idx - shift_samples
+        
+        # DYNAMIC GATING: Adjust window indices for the current harmonic
         if k == 1:
-            start_idx = gate_start_idx
-            end_idx = gate_end_idx
-            segment = full_ir[start_idx:end_idx].copy()
+            current_gate_start = gate_start_idx
+            current_gate_end = gate_end_idx
         else:
-            segment, start_idx = extract_harmonic_segment(
-                full_ir, sample_rate, duration, start_freq, 0.99 * nyquist, timezero_sample_idx, k
-            )
-
-        freqs, mag_db, phase_deg, min_phase_deg, delta_f, raw_fft = compute_frequency_response(
-            audio_data=segment,
-            sample_rate=sample_rate,
-            gate_end_idx=len(segment),
-            tukey_alpha=tukey_alpha
-        )
-
-        # Add Phase Rotation relative to timezero_sample_idx
-        time_delay = (start_idx - timezero_sample_idx) / sample_rate
-        phase_rotation = np.exp(1j * -2.0 * np.pi * freqs * time_delay)
-        aligned_fft = raw_fft * phase_rotation
+            shift_next = get_shift(k + 1)
+            shift_prev = get_shift(k - 1)
+            
+            dist_to_next = shift_next - shift_samples
+            dist_to_prev = shift_samples - shift_prev  # Corrected: Works uniformly for all k >= 2
+            
+            # Determine the relative radii of the fundamental gate
+            fund_left_radius = max(0, main_peak_idx - gate_start_idx)
+            fund_right_radius = max(0, gate_end_idx - main_peak_idx)
+            
+            # Use 90% of the gap, BUT never exceed the fundamental's window size
+            safe_radius_left = min(int(dist_to_next * 0.9), fund_left_radius)
+            safe_radius_right = min(int(dist_to_prev * 0.9), fund_right_radius)
+            
+            current_gate_start = harmonic_peak_idx - safe_radius_left
+            current_gate_end = harmonic_peak_idx + safe_radius_right
         
-        corrected_phase = np.angle(aligned_fft, deg=True)
-        corrected_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(corrected_phase)))
-        corrected_min_phase_unwrapped = np.rad2deg(np.unwrap(np.deg2rad(min_phase_deg)))
-
-        corrected_freqs = freqs / k
-        corrected_mag_db = mag_db.copy()
+        # Ensure indices stay within valid array bounds
+        current_gate_start = max(0, current_gate_start)
+        current_gate_end = min(len(impulse_full), current_gate_end)
         
-        if k > 1:
-            corrected_mag_db += 20.0 * np.log10(k)
-
-        # --- FREQUENCY GRID SELECTION ---
-        if float(Fgrid_density) == 0.0:
-            # Retain raw linear FFT grid from DC to Nyquist
-            log_freqs = corrected_freqs
-            log_mag_db = corrected_mag_db
-            log_phase = corrected_phase_unwrapped
-            log_min_phase = corrected_min_phase_unwrapped
+        if current_gate_end <= current_gate_start:
+            slice_audio = np.zeros(gate_end_idx - gate_start_idx)
         else:
-            # --- LOGARITHMIC FREQUENCY GRID & ENERGY AVERAGING ---
-            window_width = window_len / sample_rate
-            f_window_limit = 1.0 / window_width if window_width > 0 else 0.0
+            slice_audio = impulse_full[current_gate_start:current_gate_end]
+        
+        # Apply Tukey window
+        if len(slice_audio) > 0:
+            tukey_w = signal.windows.tukey(len(slice_audio), alpha=tukey_alpha)
+            windowed_slice = slice_audio * tukey_w
+        else:
+            windowed_slice = np.array([0.0])
             
-            f_start = max(start_freq, f_window_limit, 10.0)
-            harm_max_valid_freq = max_valid_freq / k
-            f_max = min(harm_max_valid_freq, 0.92 * nyquist / k)
+        # PHASE FIX: Circularly shift the array so the impulse peak sits at index 0.
+        # This prevents wild phase wrapping and produces the true phase response.
+        peak_offset = harmonic_peak_idx - current_gate_start
+        windowed_slice_shifted = np.roll(windowed_slice, -peak_offset)
+        
+        # Compute FFT spectrum on the shifted slice
+        fft_vals = np.fft.rfft(windowed_slice_shifted)
+        raw_fft_freqs = np.fft.rfftfreq(len(windowed_slice_shifted), 1.0 / sample_rate)
+        
+        # MAP TO FUNDAMENTAL: Divide by k so distortion is plotted 
+        # against the stimulus frequency that caused it.
+        fft_freqs = raw_fft_freqs / k 
+        
+        delta_f = sample_rate / len(windowed_slice) if len(windowed_slice) > 0 else 0.0
+        
+        # Compute exact magnitude natively
+        mag_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)
+
+        phase = np.angle(fft_vals)
+        
+        try:
+            log_mag = np.log(np.abs(fft_vals) + 1e-12)
+            min_phase = -signal.hilbert(log_mag).imag
+        except Exception:
+            min_phase = np.zeros_like(phase)
             
-            if f_start < f_max:
-                n_octaves = np.log2(f_max / f_start)
-                num_points = int(np.ceil(n_octaves * float(Fgrid_density))) + 1
-                log_freqs = f_start * (2.0 ** (np.arange(num_points) / float(Fgrid_density)))
-                log_freqs = log_freqs[log_freqs <= f_max]
+        # Format output according to frequency grid preference
+        if Fgrid_density > 0:
+            valid_mask = (fft_freqs >= start_freq) & (fft_freqs <= max_valid_freq)
+            if np.sum(valid_mask) > 1:
+                f_interp = fft_freqs[valid_mask]
+                m_interp = mag_db[valid_mask]
+                p_interp = phase[valid_mask]
+                mp_interp = min_phase[valid_mask]
                 
-                log_mag_db = np.zeros_like(log_freqs)
-                half_octave_factor = 2.0 ** (1.0 / (2.0 * float(Fgrid_density)))
-                
-                for i, fc in enumerate(log_freqs):
-                    f_low = fc / half_octave_factor
-                    f_high = fc * half_octave_factor
-                    bin_mask = (corrected_freqs >= f_low) & (corrected_freqs < f_high)
-                    
-                    if np.any(bin_mask):
-                        # Energy averaging using np.mean to normalize for expanding bandwidth
-                        p_lin = 10.0 ** (corrected_mag_db[bin_mask] / 10.0)
-                        log_mag_db[i] = 10.0 * np.log10(np.mean(p_lin))
-                    else:
-                        log_mag_db[i] = np.interp(fc, corrected_freqs, corrected_mag_db)
-                        
-                log_phase = np.interp(log_freqs, corrected_freqs, corrected_phase_unwrapped)
-                log_min_phase = np.interp(log_freqs, corrected_freqs, corrected_min_phase_unwrapped)
+                res_freqs = log_freqs
+                res_mag = np.interp(res_freqs, f_interp, m_interp, left=m_interp[0], right=m_interp[-1])
+                res_phase = np.interp(res_freqs, f_interp, p_interp, left=p_interp[0], right=p_interp[-1])
+                res_min_phase = np.interp(res_freqs, f_interp, mp_interp, left=mp_interp[0], right=mp_interp[-1])
             else:
-                log_freqs = np.array([f_start])
-                log_mag_db = np.array([0.0])
-                log_phase = np.array([0.0])
-                log_min_phase = np.array([0.0])
-        # -----------------------------------------------------
-
-        # --- ADDITIONAL FREQUENCY MASKING FOR k >= 1 ---
-        # Mask out any frequencies exceeding the valid harmonic limit (sets invalid bins to NaN)
-        max_k_freq = min(max_valid_freq / k, 0.92 * nyquist / k)
-        invalid_mask = log_freqs > max_k_freq
-        if np.any(invalid_mask):
-            log_mag_db[invalid_mask] = np.nan
-            log_phase[invalid_mask] = np.nan
-            log_min_phase[invalid_mask] = np.nan
-
-        harmonic_results[k] = {
-            'freqs': log_freqs,
-            'mag_db': log_mag_db,
-            'phase': log_phase,
-            'min_phase': log_min_phase,
-            'delta_frequency': delta_f
-        }
-
-    # 3. Low-Frequency Boundary Truncation Matrix for THD Calculations & Grid Unification
-    if 1 in harmonic_results and len(harmonic_results) > 1:
-        f_ref = harmonic_results[1]['freqs']
-        h1_mag = harmonic_results[1]['mag_db']
-        sum_sq_harmonics_linear = np.zeros_like(f_ref)
-        
-        valid_thd_mask = f_ref >= (2.0 * start_freq)
-        
-        for k in range(2, max_harmonic + 1):
-            if k in harmonic_results:
-                h_data = harmonic_results[k]
-                
-                mag_k_interp = np.interp(f_ref, h_data['freqs'], h_data['mag_db'], left=np.nan, right=np.nan)
-                phase_k_interp = np.interp(f_ref, h_data['freqs'], h_data['phase'], left=np.nan, right=np.nan)
-                min_phase_k_interp = np.interp(f_ref, h_data['freqs'], h_data['min_phase'], left=np.nan, right=np.nan)
-                
-                linear_ratio = 10.0 ** ((mag_k_interp - h1_mag) / 20.0)
-                
-                max_harmonic_freq = sample_rate / (2.0 * k)
-                linear_ratio[f_ref > max_harmonic_freq] = 0.0
-                mag_k_interp[f_ref > max_harmonic_freq] = np.nan
-                
-                sum_sq_harmonics_linear += np.nan_to_num(linear_ratio ** 2, nan=0.0)
-                
-                harmonic_results[k]['freqs'] = f_ref
-                harmonic_results[k]['mag_db'] = mag_k_interp
-                harmonic_results[k]['phase'] = phase_k_interp
-                harmonic_results[k]['min_phase'] = min_phase_k_interp
-                
-        thd_linear = np.sqrt(sum_sq_harmonics_linear)
-        thd_percent = thd_linear * 100.0
-        
-        thd_percent[~valid_thd_mask] = np.nan
-        harmonic_results['thd_percent'] = thd_percent
-        
-        harmonic_results['freqs'] = f_ref
-        harmonic_results['mag_db'] = h1_mag
-        harmonic_results['phase'] = harmonic_results[1]['phase']
-        harmonic_results['min_phase'] = harmonic_results[1]['min_phase']
-        
+                res_freqs = log_freqs
+                res_mag = np.zeros_like(log_freqs)
+                res_phase = np.zeros_like(log_freqs)
+                res_min_phase = np.zeros_like(log_freqs)
+            
+            harmonic_results[k] = {
+                'freqs': res_freqs,
+                'mag_db': res_mag,
+                'phase': res_phase,
+                'min_phase': res_min_phase,
+                'delta_frequency': delta_f
+            }
+        else:
+            harmonic_results[k] = {
+                'freqs': fft_freqs,
+                'mag_db': mag_db,
+                'phase': phase,
+                'min_phase': min_phase,
+                'delta_frequency': delta_f
+            }
+            
     return harmonic_results
 
+
+
+def compute_thd_percent(harmonic_results):
+    """
+    Computes the percent Total Harmonic Distortion (THD) for k >= 2 relative to k=1
+    across the frequency spectrum and adds it to the dictionary under 'thd_pecent'.
+
+    Parameters:
+    -----------
+    harmonic_results : dict
+        The dictionary returned by run_farina_analysis containing harmonic data 
+        keyed by integer harmonic orders (1, 2, 3, etc.).
+
+    Returns:
+    --------
+    dict
+        The updated dictionary containing the original harmonic data plus 
+        the 'thd_pecent' array.
+    """
+    if 1 not in harmonic_results:
+        raise ValueError("Fundamental harmonic (k=1) is missing from harmonic_results.")
+
+    # Get linear amplitude of the fundamental (k=1) from its dB magnitude
+    mag_db_1 = harmonic_results[1]['mag_db']
+    amp_1 = 10.0 ** (mag_db_1 / 20.0)
+
+    # Initialize accumulator for the sum of squares of higher harmonics (k >= 2)
+    sum_sq_higher_amps = np.zeros_like(amp_1)
+    higher_harmonics_count = 0
+
+    # Iterate through all available harmonic keys in the dictionary
+    for k in harmonic_results.keys():
+        if isinstance(k, int) and k >= 2:
+            higher_harmonics_count += 1
+            mag_db_k = harmonic_results[k]['mag_db']
+            amp_k = 10.0 ** (mag_db_k / 20.0)
+            sum_sq_higher_amps += amp_k ** 2
+
+    # If no higher harmonics are present, THD is 0%
+    if higher_harmonics_count == 0:
+        thd_percent = np.zeros_like(amp_1)
+    else:
+        # Prevent division by zero where fundamental amplitude is extremely close to zero
+        safe_amp_1 = np.where(amp_1 == 0, 1e-12, amp_1)
+        
+        # THD formula: (sqrt(sum(amp_k^2)) / amp_1) * 100
+        thd_percent = (np.sqrt(sum_sq_higher_amps) / safe_amp_1) * 100.0
+
+    # Store the result in the dictionary under the requested key name
+    harmonic_results['thd_percent'] = thd_percent
+
+    return harmonic_results
+
+
+
+
+def mask_harmonic_results(harmonic_results, resolution, sampling_rate, HF_window_startF):
+    """
+    Masks data in the harmonic results dictionary by setting values to NaN 
+    when frequencies fall below resolution, exceed upper caps, or when 
+    the actual k-th harmonic frequency exceeds the Nyquist limit.
+
+    Parameters:
+    -----------
+    harmonic_results : dict
+        The dictionary containing harmonic data and 'thd_percent'.
+    resolution : float
+        The minimum frequency resolution limit in Hz.
+    sampling_rate : float or int
+        The sampling rate of the audio in Hz.
+    HF_window_startF : float
+        The high-frequency window start limit in Hz.
+
+    Returns:
+    --------
+    dict
+        The updated dictionary with NaN masking applied where criteria are met.
+    """
+    nyquist_freq = 0.5 * sampling_rate
+    upper_freq_limit = 0.92 * nyquist_freq
+
+    # Iterate through all keys in the dictionary
+    for k in list(harmonic_results.keys()):
+        
+        # Handle 'thd_percent' if present
+        if k == 'thd_percent':
+            if 1 in harmonic_results: # safe check
+                freqs = harmonic_results[1]['freqs']
+                mask = (freqs < resolution) | (freqs > upper_freq_limit) | (freqs > HF_window_startF)
+                harmonic_results['thd_percent'] = np.where(mask, np.nan, harmonic_results['thd_percent'])
+            continue
+
+        # Process integer harmonic keys (k = 1, 2, 3, ...)
+        if isinstance(k, int):
+            h_dict = harmonic_results[k]
+            freqs = h_dict['freqs']
+            
+            # Criterion 1: Frequency is below resolution (Applies to all k)
+            mask = freqs < resolution
+            
+            # Criterion 2: For k > 1, check upper bounds and actual harmonic frequency vs Nyquist
+            if k > 1:
+                actual_harmonic_freqs = freqs * k
+                mask = mask | (freqs > upper_freq_limit) | (freqs > HF_window_startF) | (actual_harmonic_freqs > nyquist_freq)
+            
+            # Apply NaN mask to data fields
+            for field in ['mag_db', 'phase', 'min_phase']:
+                if field in h_dict:
+                    data = np.array(h_dict[field], dtype=float)
+                    data[mask] = np.nan
+                    h_dict[field] = data
+
+    return harmonic_results
 
 
 
@@ -695,7 +630,7 @@ def main():
     
     try:
         # Read the raw microphone data, Farina inverse filter, and stimulus data
-        sample_rate, mic_data, mic_metadata = read_wav_file_plus_info(args.measurement_datafile)
+        sample_rate, mic_data, measurement_metadata = read_wav_file_plus_info(args.measurement_datafile)
         FF_sample_rate, inv_filter, FF_metadata = read_wav_file_plus_info(args.farina_filterfile)
         H1_sample_rate, h1_impulse, impulse_metadata = read_wav_file_plus_info(args.impulse_datafile)
     except FileNotFoundError as e:
@@ -712,42 +647,41 @@ def main():
         print(f"   Impulse Response SR = '{H1_sample_rate}' Hz")
         print(f"All sample rates must be identical. Exiting.")
         return
-
     """
     # Run a validation check on the metadata from each input file
-    all_metadata = [mic_metadata, FF_metadata, impulse_metadata]
+    all_metadata = [measurement_metadata, FF_metadata, impulse_metadata]
     if not Is_Consistent_Data(all_metadata):
         print("ERROR: parameter mismatch between the measurement, Farina filter, and impulse response data.")    
         print("The parameters used during the measurement must be identical for all files!")
         # Print out required measurement parameters
         print(f"\n------------------------ Measurement Parameters: -------------------------------")
-        print(f"             Start Frequency (f0sw): {mic_metadata.get("f0sw", 0.0)} Hz")
-        print(f"               End Frequency (f1sw): {mic_metadata.get("f1sw", 0.0)} Hz")
-        print(f"                  Chirp Rate (rchr): {mic_metadata.get("rchr", 0.0)} seconds/decade Hz")
-        print(f"                 Repetitions (reps): {mic_metadata.get("reps", 1)}")
-        print(f"              Internal Level (levl): {mic_metadata.get("levl", -10.0)} dB")
-        print(f"             HF Window Start (fhfw): {mic_metadata.get("fhfw", 0.0)} Hz")
+        print(f"             Start Frequency (f0sw): {measurement_metadata.get("f0sw", 0.0)} Hz")
+        print(f"               End Frequency (f1sw): {measurement_metadata.get("f1sw", 0.0)} Hz")
+        print(f"                  Chirp Rate (rchr): {measurement_metadata.get("rchr", 0.0)} seconds/decade Hz")
+        print(f"                 Repetitions (reps): {measurement_metadata.get("reps", 1)}")
+        print(f"              Internal Level (levl): {measurement_metadata.get("levl", -10.0)} dB")
+        print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"--------------------------------------------------------------------------------\n\n")
         print("Exiting Program.")
         return
     else:
-        measurement_start_freq = mic_metadata.get("f0sw", 0.0)
-        measurement_timestamp = datetime.fromtimestamp(mic_metadata.get("date", 0))
+        measurement_start_freq = measurement_metadata.get("f0sw", 0.0)
+        HF_window_startF = measurement_metadata.get("fhfw", 0.0)
+        measurement_timestamp = datetime.fromtimestamp(measurement_metadata.get("date", 0))
         # Print out validated parameters
         print(f"\n------------------------ Measurement Parameters: -------------------------------")
-        print(f"             Start Frequency (f0sw): {mic_metadata.get("f0sw", 0.0)} Hz")
-        print(f"               End Frequency (f1sw): {mic_metadata.get("f1sw", 0.0)} Hz")
-        print(f"                  Chirp Rate (rchr): {mic_metadata.get("rchr", 0.0)} seconds/decade Hz")
-        print(f"                 Repetitions (reps): {mic_metadata.get("reps", 1)}")
-        print(f"              Internal Level (levl): {mic_metadata.get("levl", -10.0)} dB")
-        print(f"             HF Window Start (fhfw): {mic_metadata.get("fhfw", 0.0)} Hz")
+        print(f"             Start Frequency (f0sw): {measurement_metadata.get("f0sw", 0.0)} Hz")
+        print(f"               End Frequency (f1sw): {measurement_metadata.get("f1sw", 0.0)} Hz")
+        print(f"                  Chirp Rate (rchr): {measurement_metadata.get("rchr", 0.0)} seconds/decade Hz")
+        print(f"                 Repetitions (reps): {measurement_metadata.get("reps", 1)}")
+        print(f"              Internal Level (levl): {measurement_metadata.get("levl", -10.0)} dB")
+        print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
         print(f"--------------------------------------------------------------------------------\n")
-    """    
-
-    #set these parmaeters manually during debugging  only ! < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < < <
-    measurement_start_freq = 10.0
-    HF_window_startF = 0.91 * 0.5 * sample_rate
+    """
+    measurement_start_freq = 10.0     #20.0
+    HF_window_startF = 20000.0   #0.975 * 0.5 * sample_rate
+    #measurement_timestamp = datetime.datetime.now()
 
     # 1. Compute the full impulse response using Farina deconvolution
     print("Computing the time domain impulse response using the Farina method...")
@@ -1333,6 +1267,9 @@ def main():
         else:
             print(f"Computing Farina Method response up to HD {state['hd_max']}...")
             
+            window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
+            state['resolution'] = 1.0 / window_duration
+
             results = run_farina_analysis(
                 recorded_audio=mic_data,
                 sample_rate=sample_rate,
@@ -1379,12 +1316,17 @@ def main():
                 # Update the dictionary with the fully calibrated magnitude data
                 harmonic_data['mag_db'] = mag_db            
             
+
+            #calculate the THD in percent and add it to the dictionary
+            results = compute_thd_percent( results )
+
+            #mask data outside valid frequencies
+            results = mask_harmonic_results(results, state["resolution"], sample_rate, HF_window_startF)
+
+
             #store the results in the state variable
             state['smoothed_harmonic_results'] = results
             
-            window_duration = (state['gate_idx'] - state['gate_start_idx']) / sample_rate
-            state['resolution'] = 1.0 / window_duration
-
             refresh_frequency_plot()
             print(f"The Farina analysis has completed and new data is available.\n")
 

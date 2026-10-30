@@ -610,7 +610,9 @@ std::vector<float> generate_log_chirp(const AppArgs& args) {
     const float width_in_decades = 0.3f;  
     int start_length = static_cast<int>(args.sample_rate * (duration * (width_in_decades / total_decades)));    
     // Taper width for high frequency end of chirp is fixed at 220 samples. 
-    //   This corresponds to 5 ms at a 44.1 kHz sample rate. 
+    //   This corresponds to 5 ms at a 44.1 kHz sample rate. In terms of
+    //   frequency, it is approximately 0.975 times the Nyquist frequency 
+    //   regardless of sample rate. 
     int end_length = 220;
 
     // Apply Tapers:
@@ -637,66 +639,54 @@ std::vector<float> generate_log_chirp(const AppArgs& args) {
 //    frequency fade-out taper to suppress ringing near the Nyquist frequency
 
 std::vector<float> generate_Farina_inverse_filter(const AppArgs& args) {
-    // Promote core variables to double precision from AppArgs
+    // 1. Setup core duration and sampling variables (ignoring end padding)
     double d_sample_rate = static_cast<double>(args.sample_rate);
     double d_start_freq  = static_cast<double>(args.start_freq);
     double d_end_freq    = static_cast<double>(args.end_freq);
-    double d_hf_window_startF = static_cast<double>(args.HF_window_startF);
-    double d_chirp_rate  = static_cast<double>(args.chirp_rate);
-
-    if (d_start_freq <= 0.0 || d_end_freq <= d_start_freq || 
-        d_hf_window_startF < d_start_freq || d_hf_window_startF > d_end_freq || 
-        d_chirp_rate <= 0.0 || args.sample_rate <= 0) {
-        throw std::invalid_argument("Invalid parameters for inverse filter generation.");
-    }
-
     double total_decades = std::log10(d_end_freq / d_start_freq);
-    double duration = d_chirp_rate * total_decades;
-    int num_samples = static_cast<int>(d_sample_rate * duration);
+    double duration      = static_cast<double>(args.chirp_rate) * total_decades;
+    int num_samples      = static_cast<int>(d_sample_rate * duration);
 
-    std::vector<double> ideal_sweep(num_samples);
     std::vector<float> final_inv_filter(num_samples);
 
-    const double ln_ratio = std::log(d_end_freq / d_start_freq);
-    const double phase_factor = d_start_freq * duration / ln_ratio;
-    const double ratio = d_end_freq / d_start_freq;
-    const double two_pi = 2.0 * M_PI;
+    double ln_ratio = std::log(d_end_freq / d_start_freq);
+    double phase_factor = d_start_freq * duration / ln_ratio;
+    double ratio = d_end_freq / d_start_freq;
+    double two_pi = 2.0 * M_PI;
+    double sweep_rate_L = duration / ln_ratio;
 
-    // 1. Generate the ideal forward exponential sweep stimulus
+    // 2. Generate the exact sweep at 0 dB (amplitude = 1.0)
+    std::vector<double> ideal_sweep(num_samples);
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / d_sample_rate;
         double phase = two_pi * phase_factor * (std::pow(ratio, t / duration) - 1.0);
         ideal_sweep[i] = std::sin(phase);
     }
 
-    // 2. Compute the precise Farina normalization scaling constant.
-    double sweep_rate_L = duration / ln_ratio;
-    double normalization_scaler = 2.0 / (d_sample_rate * sweep_rate_L);
+    // 3. Apply the EXACT SAME fades as the stimulus generator
+    const float width_in_decades = 0.3f;  
+    int start_length = static_cast<int>(d_sample_rate * (duration * (width_in_decades / total_decades)));    
+    int end_length = 220;
 
-    // 3. Construct Farina Inverse Filter (Time-reversed + Correct Exponential growth)
+    for (int i = 0; i < start_length; ++i) {
+        double hann = 0.5 * (1.0 - std::cos(M_PI * static_cast<double>(i) / start_length));
+        ideal_sweep[i] *= hann;
+    }
+    for (int i = 0; i < end_length; ++i) {
+        double hann = 0.5 * (1.0 - std::cos(M_PI * static_cast<double>(i) / end_length));
+        ideal_sweep[num_samples - end_length + i] *= (1.0 - hann);
+    }
+
+    // 4. Amplitude scalar matching the validated Python code
+    double normalization_scaler = d_start_freq / sweep_rate_L;
+
+    // 5. Construct Farina Inverse Filter (Reverse, apply exp(-t/L), and scale)
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / d_sample_rate;
         int rev_idx = num_samples - 1 - i;
         
-        double modulation = std::exp((duration - t) / sweep_rate_L) * normalization_scaler;
-        final_inv_filter[i] = static_cast<float>(ideal_sweep[rev_idx] * modulation);
-    }
-
-    // 4. Apply High-Frequency Fade-Out Window between HF_window_startF and end_freq
-    // Because the inverse filter is time-reversed, the maximum frequency (end_freq) 
-    // happens at index i = 0. Fading out high frequencies means fading IN at index 0.
-    double fade_duration = sweep_rate_L * std::log(d_end_freq / d_hf_window_startF);
-    int fade_samples = static_cast<int>(d_sample_rate * fade_duration);
-    if (fade_samples > num_samples) {
-        fade_samples = num_samples;
-    }
-
-    for (int i = 0; i < fade_samples; ++i) {
-        // Taper using a raised cosine (half-Hann window) from 0.0 to 1.0
-        double angle = (static_cast<double>(i) / fade_samples) * (M_PI / 2.0);
-        double taper = std::sin(angle);
-        
-        final_inv_filter[i] *= static_cast<float>(taper);
+        double envelope = std::exp(-t / sweep_rate_L);
+        final_inv_filter[i] = static_cast<float>(ideal_sweep[rev_idx] * envelope * normalization_scaler);
     }
 
     return final_inv_filter;
