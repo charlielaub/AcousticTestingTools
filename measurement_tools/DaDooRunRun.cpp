@@ -76,7 +76,7 @@ struct AppArgs {
     int sample_rate = 48000;
     float chirp_rate = 2.0f;
     float start_freq = 1.0f;
-    float end_freq = 0.99f * sample_rate;
+    float end_freq = 0.99f * 0.5 * sample_rate;
     float HF_window_startF = 0.975f * end_freq;
     int repetitions = 1;
     float alignment_window = 5.0f;
@@ -297,6 +297,9 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             std::exit(1);
         }
     }
+    args.end_freq = 0.99f * 0.5f * args.sample_rate;
+    args.HF_window_startF = 0.975f * 0.5f * args.sample_rate;
+    
     return args;
 }
 

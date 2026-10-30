@@ -70,15 +70,65 @@ def parse_arguments():
 
 
 
-import numpy as np
-from scipy import signal
+def check_harmonic_window_overlaps(full_ir, inv_filter, sample_rate, start_freq, end_freq, gate_start_idx, gate_end_idx, timezero_sample_idx, max_harmonic=5):
+    """
+    Checks if the fundamental's window size would cause overlaps between 
+    adjacent harmonics, triggering dynamic window truncation. Prints any 
+    warnings and recommendations directly to the terminal.
+    """
+    sweep_len = len(inv_filter)
+    
+    # 1. Find the true absolute peak of the fundamental impulse 
+    search_start = max(0, timezero_sample_idx - int(sample_rate * 0.1))
+    search_end = min(len(full_ir), timezero_sample_idx + int(sample_rate * 0.1))
+    main_peak_idx = search_start + np.argmax(np.abs(full_ir[search_start:search_end]))
+    
+    peak_indices = {}
+    
+    # Use the exact same shift logic from run_farina_analysis
+    def get_shift(k_order):
+        if k_order <= 1: return 0
+        return int(np.round((sweep_len / np.log(end_freq / start_freq)) * np.log(k_order)))
+
+    # 2. Calculate peak indices for all harmonics
+    for k in range(1, max_harmonic + 1):
+        peak_indices[k] = main_peak_idx - get_shift(k)
+        
+    # Extract the relative right-side radius of the user's requested window
+    fund_right_radius = max(0, gate_end_idx - main_peak_idx)
+    
+    warnings_found = False
+    
+    # 3. Check for overlaps between adjacent harmonics and print directly
+    for k in range(2, max_harmonic + 1):
+        current_peak = peak_indices[k]
+        prev_peak = peak_indices[k - 1] # The lower-order harmonic to its right
+        
+        # Calculate where the requested window would end relative to this harmonic's peak
+        window_end_sample = current_peak + fund_right_radius
+        
+        if window_end_sample > prev_peak:
+            overlap_samples = window_end_sample - prev_peak
+            warnings_found = True
+            print(
+                f"Overlap Warning: The requested window for Harmonic {k} extends past the peak of "
+                f"Harmonic {k-1} by {overlap_samples} samples. Dynamic gating will truncate it.\n"
+                f"  -> Note: Due to this truncation, the reported SPL level of Harmonic {k} may be slightly under-represented."
+            )
+            
+    # 4. Print recommendation if any warnings were triggered
+    if warnings_found:
+        print("\nRecommendation: Consider reducing the right-side window length or increasing the physical sweep duration.")
+
+
+
 
 def run_farina_analysis(
     recorded_audio,
     sample_rate,
     inv_filter,
     start_freq,
-    max_valid_freq,
+    end_freq,
     Fgrid_density,
     gate_start_idx,
     gate_end_idx,
@@ -103,8 +153,8 @@ def run_farina_analysis(
         The pre-generated inverse filter matching the stimulus sweep.
     start_freq : float
         The starting frequency of the logarithmic sweep in Hz.
-    max_valid_freq : float
-        The maximum valid frequency limit for the analysis in Hz.
+    end_freq : float
+        The end frequency of the logarithmic sweep in Hz.
     Fgrid_density : float or int
         Frequency grid density in points per octave. Set to 0 for a raw linear FFT grid.
     gate_start_idx : int
@@ -127,14 +177,28 @@ def run_farina_analysis(
     # 1. Deconvolve recorded audio with the inverse filter
     impulse_full = signal.fftconvolve(recorded_audio, inv_filter, mode='full')
     sweep_len = len(inv_filter)
+    
+    # Check for overlapping harmonic windows and warn user if any are found
+    check_harmonic_window_overlaps(
+        full_ir=impulse_full,
+        inv_filter=inv_filter,
+        sample_rate=sample_rate,
+        start_freq=start_freq,
+        end_freq=end_freq,
+        gate_start_idx=gate_start_idx,
+        gate_end_idx=gate_end_idx,
+        timezero_sample_idx=timezero_sample_idx,
+        max_harmonic=max_harmonic
+    )
+    
     harmonic_results = {}
     
     # 2. Pre-calculate logarithmic frequency grid if requested
     if Fgrid_density > 0:
-        octaves = np.log2(max_valid_freq / start_freq)
+        octaves = np.log2(end_freq / start_freq)
         num_points = int(np.ceil(octaves * Fgrid_density))
         log_freqs = start_freq * (2.0 ** (np.arange(num_points) / Fgrid_density))
-        log_freqs = log_freqs[log_freqs <= max_valid_freq]
+        log_freqs = log_freqs[log_freqs <= end_freq]
 
     # Find the true absolute peak of the fundamental impulse 
     # (Constrain search near the provided timezero to avoid random noise spikes)
@@ -145,7 +209,7 @@ def run_farina_analysis(
     # Helper function to calculate exact sample shift for any harmonic k
     def get_shift(k_order):
         if k_order <= 1: return 0
-        return int(np.round((sweep_len / np.log(max_valid_freq / start_freq)) * np.log(k_order)))
+        return int(np.round((sweep_len / np.log(end_freq / start_freq)) * np.log(k_order)))
 
     # 3. Loop through each harmonic order
     for k in range(1, max_harmonic + 1):
@@ -208,17 +272,21 @@ def run_farina_analysis(
         # Compute exact magnitude natively
         mag_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)
 
+        # Calculate raw phase (returns radians) and convert to degrees
         phase = np.angle(fft_vals)
+        phase = np.degrees(phase)
         
         try:
             log_mag = np.log(np.abs(fft_vals) + 1e-12)
+            # Hilbert transform imaginary part returns radians, convert to degrees
             min_phase = -signal.hilbert(log_mag).imag
+            min_phase = np.degrees(min_phase)
         except Exception:
             min_phase = np.zeros_like(phase)
             
         # Format output according to frequency grid preference
         if Fgrid_density > 0:
-            valid_mask = (fft_freqs >= start_freq) & (fft_freqs <= max_valid_freq)
+            valid_mask = (fft_freqs >= start_freq) & (fft_freqs <= end_freq)
             if np.sum(valid_mask) > 1:
                 f_interp = fft_freqs[valid_mask]
                 m_interp = mag_db[valid_mask]
@@ -647,7 +715,7 @@ def main():
         print(f"   Impulse Response SR = '{H1_sample_rate}' Hz")
         print(f"All sample rates must be identical. Exiting.")
         return
-    """
+
     # Run a validation check on the metadata from each input file
     all_metadata = [measurement_metadata, FF_metadata, impulse_metadata]
     if not Is_Consistent_Data(all_metadata):
@@ -678,10 +746,6 @@ def main():
         print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
         print(f"--------------------------------------------------------------------------------\n")
-    """
-    measurement_start_freq = 10.0     #20.0
-    HF_window_startF = 20000.0   #0.975 * 0.5 * sample_rate
-    #measurement_timestamp = datetime.datetime.now()
 
     # 1. Compute the full impulse response using Farina deconvolution
     print("Computing the time domain impulse response using the Farina method...")
@@ -1275,7 +1339,7 @@ def main():
                 sample_rate=sample_rate,
                 inv_filter=inv_filter,
                 start_freq=measurement_start_freq,
-                max_valid_freq=HF_window_startF,
+                end_freq=HF_window_startF,
                 Fgrid_density=state['smoothing_octaves'],
                 gate_start_idx=state['gate_start_idx'],
                 gate_end_idx=state['gate_idx'],
