@@ -680,8 +680,8 @@ std::vector<float> generate_Farina_inverse_filter(const AppArgs& args) {
         ideal_sweep[num_samples - end_length + i] *= (1.0 - hann);
     }
 
-    // 4. Amplitude scalar matching the validated Python code
-    double normalization_scaler = d_start_freq / sweep_rate_L;
+    // 4. Amplitude scalar adjusted for discrete sample-rate normalization
+    double normalization_scaler = (d_start_freq / sweep_rate_L) / d_sample_rate;
 
     // 5. Construct Farina Inverse Filter (Reverse, apply exp(-t/L), and scale)
     for (int i = 0; i < num_samples; ++i) {
