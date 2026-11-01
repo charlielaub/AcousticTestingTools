@@ -1627,7 +1627,7 @@ int main(int argc, char* argv[]) {
     //Calculate the RMS level of the simulus in internal units (0.0...1.0)
     //  Replace the value in args.level, now that data collection has ended
     //  args.level is written to all WAV data files
-    args.level = calculate_last_75_rms( averaged_ref )
+    args.level = calculate_last_75_rms( averaged_ref );
 
     // Compute time domain impulse response using H1 estimator 
     std::vector<float> h1_ir = compute_true_h1_time_domain(aligned_data);
