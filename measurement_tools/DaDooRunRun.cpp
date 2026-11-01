@@ -10,7 +10,7 @@
 /*   The test signal can be repeated N times with silence of a user defined   */
 /*   duration in between runs. The N time records are aligned and averaged    */
 /*   and the data is saved to WAV files in FLOAT32 format. The Farina method  */
-/*   inverse filter can also be saved to a WAV file for post-processing.      */
+/*   inverse filter is also be saved to a WAV file for post-processing.       */
 /*                                                                            */
 /*   Invoke with -h or --help to see a list of all program options.           */
 /*                                                                            */
@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <cctype>
 #include <unordered_set>
+#include <filesystem>
 
 #include <portaudio.h>
 #include "pocketfft_hdronly.h"
@@ -75,7 +76,7 @@ struct AppArgs {
     std::string basefilename = "results";
     int sample_rate = 48000;
     float chirp_rate = 2.0f;
-    float start_freq = 1.0f;
+    float start_freq = 10.0f;
     float end_freq = 0.99f * 0.5 * sample_rate;
     float HF_window_startF = 0.975f * end_freq;
     int repetitions = 1;
@@ -388,15 +389,32 @@ uint32_t get_current_timestamp_32() {
    parameters used to peform the measurement:
       identifier <> variable
             f0sw <> args.start_freq);
-            f1sw <> args.end_freq);
-            fhfw <> args.HF_window_startF);
-            rchr <> args.chirp_rate);
-            levl <> args.level);
-            date <> args.timestamp);
+            f1sw <> args.end_freq
+            fhfw <> args.HF_window_startF
+            rchr <> args.chirp_rate
+            levl <> args.level
+            date <> args.timestamp
+   If the filepathname contains a directory that does not exist, it will be created.
 */    
 bool write_wav_file_plus_info(AppArgs& args, const std::string& filetype, const std::vector<float>& data) {
+    namespace fs = std::filesystem;
+
     // Construct filename using basefilename and the provided filetype suffix
     std::string filename = args.basefilename + "_" + filetype + ".wav";
+
+    // 1. Ensure the destination directory exists if a path is included
+    try {
+        fs::path path_obj(filename);
+        if (path_obj.has_parent_path()) {
+            fs::create_directories(path_obj.parent_path());
+        }
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Error: Failed to create directories for path '" << filename 
+                  << "'. Reason: " << e.what() << "\n";
+        return false;
+    }
+
+    // 2. Open file for binary writing
     std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file for writing: " << filename << "\n";
@@ -414,12 +432,12 @@ bool write_wav_file_plus_info(AppArgs& args, const std::string& filetype, const 
     // Structure: 4 (WAVE) + 24 (fmt chunk) + (8 + data_bytes) (data chunk) + (8 + xdat_payload_size) (xDAT chunk)
     uint32_t riff_chunk_size = 4 + 24 + (8 + data_bytes) + (8 + xdat_payload_size);
 
-    // 1. Write RIFF Header
+    // 3. Write RIFF Header
     file.write("RIFF", 4);
     file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
     file.write("WAVE", 4);
 
-    // 2. Write fmt Chunk (PCM IEEE Float = format 3, Mono = 1 channel, 32-bit)
+    // 4. Write fmt Chunk (PCM IEEE Float = format 3, Mono = 1 channel, 32-bit)
     file.write("fmt ", 4);
     uint32_t fmt_chunk_size = 16;
     file.write(reinterpret_cast<const char*>(&fmt_chunk_size), 4);
@@ -437,14 +455,14 @@ bool write_wav_file_plus_info(AppArgs& args, const std::string& filetype, const 
     file.write(reinterpret_cast<const char*>(&block_align), 2);
     file.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
 
-    // 3. Write data Chunk
+    // 5. Write data Chunk
     file.write("data", 4);
     file.write(reinterpret_cast<const char*>(&data_bytes), 4);
     if (num_samples > 0) {
         file.write(reinterpret_cast<const char*>(data.data()), data_bytes);
     }
 
-    // 4. Write Custom "xDAT" Chunk
+    // 6. Write Custom "xDAT" Chunk
     file.write("xDAT", 4);
     file.write(reinterpret_cast<const char*>(&xdat_payload_size), 4);
 
@@ -471,7 +489,6 @@ bool write_wav_file_plus_info(AppArgs& args, const std::string& filetype, const 
     file.close();
     return file.good();
 }
-
 
 
 // Hardware Device Management
@@ -754,13 +771,7 @@ std::vector<float> fractional_delay_filter(const std::vector<float>& input, floa
 
 
 
-#include <vector>
-#include <complex>
-#include <cmath>
-#include <algorithm>
-#include <iostream>
 
-// Assuming DataContainer and pocketfft are defined in your environment
 DataContainer perform_QA_and_time_alignment(
     const DataContainer& raw_data,
     float sample_rate,
@@ -1537,6 +1548,29 @@ std::vector<float> compute_true_h1_time_domain(const DataContainer& alignment_da
 
 
 
+float calculate_last_75_rms(const std::vector<float>& averaged_ref) {
+    //This function is used to calculate the RMS level of the stimulus signal,
+    //   omitting the first 25% of the data where significant windowing is present
+    
+    if (averaged_ref.empty()) return 0.0f;
+    size_t n = averaged_ref.size();
+    size_t start = n / 4;     // from 25%
+    size_t end =  n;          // to end
+
+    if (start >= end) return 0.0f; // Handle edge cases for tiny vectors
+
+    // Sum the squares of the data values
+    float sum_squares = 0.0f;
+    for (size_t i = start; i < end; ++i) {
+        sum_squares += averaged_ref[i] * averaged_ref[i];
+    }
+
+    // Compute RMS: sqrt(sum of squares / count)
+    float RMS_level = std::sqrt(sum_squares / static_cast<float>(end - start));
+    return RMS_level;
+}
+
+
 
 
 int main(int argc, char* argv[]) {
@@ -1567,6 +1601,9 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Acoustic measurement session failed.\n";
         return -1;
     }
+    
+    //Data collection has completed, so release all port-audio resources.
+    Pa_Terminate();
 
     // Perform time-alignment, consensus anchor selection, and quality control
     DataContainer aligned_data = perform_QA_and_time_alignment(
@@ -1586,6 +1623,11 @@ int main(int argc, char* argv[]) {
     // Average the stimulus and measurement data
     std::vector<float> averaged_ref = compute_averaged_stimulus(aligned_data);
     std::vector<float> averaged_mic = compute_averaged_measurement(aligned_data);
+    
+    //Calculate the RMS level of the simulus in internal units (0.0...1.0)
+    //  Replace the value in args.level, now that data collection has ended
+    //  args.level is written to all WAV data files
+    args.level = calculate_last_75_rms( averaged_ref )
 
     // Compute time domain impulse response using H1 estimator 
     std::vector<float> h1_ir = compute_true_h1_time_domain(aligned_data);
@@ -1640,7 +1682,6 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n------------ All tasks completed ------------ \n\n";
 
-    Pa_Terminate();
     return 0;
 }
 

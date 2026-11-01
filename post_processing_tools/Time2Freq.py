@@ -29,28 +29,43 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox
 
+
+
+def parse_inline_config(arg_str):
+    """
+    Parses a string like 'V1=6.15, V2=2.45, Vg=20, Smic=0.01, d=0.25' 
+    into a dictionary of floats.
+    """
+    config = {}
+    if not arg_str:
+        return config
+        
+    for pair in arg_str.split(','):
+        if '=' not in pair:
+            raise argparse.ArgumentTypeError(f"Invalid parameter format: '{pair}'. Use key=value.")
+        key, val = pair.split('=', 1)
+        key = key.strip()
+        try:
+            config[key] = float(val.strip())
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Value for '{key}' must be a number, got '{val}'")
+            
+    return config
+
+
+
 def parse_arguments():
     """
     Parses command-line arguments for input WAV file, base filename for outputs,
     optional microphone calibration, sensitivity parameters, and amplifier gain.
     """
     parser = argparse.ArgumentParser(description="An interactive program to process loudspeaker measurements collected using the program DaDooRunRun. Exports frequency domain response data and plots.")
-    parser.add_argument("-m","--measurement_datafile", 
+    parser.add_argument("-b","--basename_infiles",
             type=str,
             required=True,
-            help="Path to the WAV file containing the microphone measurement data."
+            help="Base file name for the input WAV files."
     )
-    parser.add_argument("-i","--impulse_datafile", 
-            type=str,
-            required=True,
-            help="Path to the WAV file containing the impulse response data."
-    )
-    parser.add_argument("-f","--farina_filterfile", 
-            type=str,
-            required=True,
-            help="Path to the WAV file containing the Farina inverse filter."
-    )
-    parser.add_argument("-b", "--basename", 
+    parser.add_argument("-B", "--basename_outfiles", 
             type=str, 
             default="response",
             help="Base file name for output files (default: response)."
@@ -60,10 +75,11 @@ def parse_arguments():
             default=None,
             help="Path to microphone calibration file (*.mic or *.cal)."
     )
-    parser.add_argument("-k","--spl_correction_factor", 
-            type=float, 
-            default=1.0,
-            help="Lumped SPL correction factor."
+    # Compact inline configuration string
+    parser.add_argument("-k","--spl_corrections", 
+            type=parse_inline_config,
+            default={},
+            help="String of the parameters used to set the SPL level: '-k V1=6.15, V2=2.45, Ag=20, Smic=0.01, d=0.25'"
     )
     return parser.parse_args()
 
@@ -438,83 +454,73 @@ def mask_harmonic_results(harmonic_results, resolution, sampling_rate, HF_window
 
 
 def read_wav_file_plus_info(filename):
-  """Reads a 32-bit float mono WAV file and extracts the audio data,
-        the sample rate, and the following metadata into a dictionary:
-                             parameter <> chunk identifier:
-                      sweep start freq <> f0sw
-                        sweep end freq <> f1sw
-                           repetitions <> reps
-                            chirp rate <> rchr
-                        internal level <> levl
-  hf_window start F for inverse filter <> fhfw
-                             timestamp <> date
-  """
-  with open(filename, "rb") as f:
-    # 1. Verify RIFF header
-    riff = f.read(4)
-    if riff != b"RIFF":
-      raise ValueError("Not a valid RIFF WAV file.")
+    """
+    Reads a 32-bit float mono WAV file and extracts the audio data (as a NumPy array),
+    the sample rate, and custom xDAT metadata into a dictionary.
+    Optimized with NumPy frombuffer for high speed and low memory usage.
+    """
+    with open(filename, "rb") as f:
+        # 1. Verify RIFF header
+        riff = f.read(4)
+        if riff != b"RIFF":
+            raise ValueError("Not a valid RIFF WAV file.")
 
-    file_size = struct.unpack("<I", f.read(4))[0]
-    wave = f.read(4)
-    if wave != b"WAVE":
-      raise ValueError("Not a valid WAVE file.")
+        file_size = struct.unpack("<I", f.read(4))[0]
+        wave = f.read(4)
+        if wave != b"WAVE":
+            raise ValueError("Not a valid WAVE file.")
 
-    sample_rate = None
-    audio_data = []
-    custom_metadata = {}
+        sample_rate = None
+        audio_data = np.array([], dtype=np.float32)
+        custom_metadata = {}
 
-    # 2. Traverse file chunks iteratively
-    while True:
-      chunk_id = f.read(4)
-      if not chunk_id or len(chunk_id) < 4:
-        break
+        # 2. Traverse file chunks iteratively
+        while True:
+            chunk_id = f.read(4)
+            if not chunk_id or len(chunk_id) < 4:
+                break
 
-      chunk_size_bytes = f.read(4)
-      if not chunk_size_bytes or len(chunk_size_bytes) < 4:
-        break
-      chunk_size = struct.unpack("<I", chunk_size_bytes)[0]
+            chunk_size_bytes = f.read(4)
+            if not chunk_size_bytes or len(chunk_size_bytes) < 4:
+                break
+            chunk_size = struct.unpack("<I", chunk_size_bytes)[0]
 
-      if chunk_id == b"fmt ":
-        fmt_data = f.read(chunk_size)
-        # Extract audio format, number of channels, and sample rate
-        audio_format, num_channels, sample_rate = struct.unpack(
-            "<HHI", fmt_data[:8]
-        )
-        if audio_format != 3:  # 3 indicates IEEE float format
-          raise ValueError(
-              "WAV file is not in 32-bit IEEE float format (format tag 3)."
-          )
+            if chunk_id == b"fmt ":
+                fmt_data = f.read(chunk_size)
+                audio_format, num_channels, sample_rate = struct.unpack(
+                    "<HHI", fmt_data[:8]
+                )
+                if audio_format != 3:  # 3 indicates IEEE float format
+                    raise ValueError(
+                        "WAV file is not in 32-bit IEEE float format (format tag 3)."
+                    )
 
-      elif chunk_id == b"data":
-        data_bytes = f.read(chunk_size)
-        num_samples = chunk_size // 4
-        audio_data = list(struct.unpack(f"<{num_samples}f", data_bytes))
+            elif chunk_id == b"data":
+                data_bytes = f.read(chunk_size)
+                # Zero-copy memory mapping via NumPy frombuffer
+                audio_data = np.frombuffer(data_bytes, dtype=np.float32).copy()
 
-      elif chunk_id == b"xDAT":
-        xdat_data = f.read(chunk_size)
-        offset = 0
-        # Parse 8-byte blocks: 4 bytes tag + 4 bytes value
-        while offset < chunk_size:
-          tag = xdat_data[offset : offset + 4].decode("utf-8", errors="ignore")
-          offset += 4
+            elif chunk_id == b"xDAT":
+                xdat_data = f.read(chunk_size)
+                offset = 0
+                while offset < chunk_size:
+                    tag = xdat_data[offset : offset + 4].decode("utf-8", errors="ignore")
+                    offset += 4
 
-          if tag in ("date", "reps"):
-            # Timestamp and repetitions are stored as uint32 integers
-            val = struct.unpack("<I", xdat_data[offset : offset + 4])[0]
-          else:
-            # All other parameters are stored as floats
-            val = struct.unpack("<f", xdat_data[offset : offset + 4])[0]
-          offset += 4
+                    if tag in ("date", "reps"):
+                        val = struct.unpack("<I", xdat_data[offset : offset + 4])[0]
+                    else:
+                        val = struct.unpack("<f", xdat_data[offset : offset + 4])[0]
+                    offset += 4
 
-          custom_metadata[tag] = val
-      else:
-        # Skip unknown chunks
-        f.seek(chunk_size, 1)
+                    custom_metadata[tag] = val
+            else:
+                # Skip unknown chunks
+                f.seek(chunk_size, 1)
 
-      # Handle RIFF word-alignment padding (chunks must be even-sized bytes)
-      if chunk_size % 2 != 0:
-        f.seek(1, 1)
+            # Handle RIFF word-alignment padding
+            if chunk_size % 2 != 0:
+                f.seek(1, 1)
 
     return sample_rate, audio_data, custom_metadata
 
@@ -695,12 +701,27 @@ def main():
 
     # Parse command-line arguments
     args = parse_arguments()
+
+    # Extract parameters with fallback defaults if a key wasn't specified in the string
+    v_in1_max = args.spl_corrections.get('V1', 0.0)
+    v_in2_max = args.spl_corrections.get('V2', 0.0)
+    amp_gain  = args.spl_corrections.get('Ag', 0.0)
+    mic_sens  = args.spl_corrections.get('Smic', 0.0)
+    distance  = args.spl_corrections.get('d', 0.0)
     
+    print(f"\nSPL correction parameters V1: {v_in1_max}, V2: {v_in2_max}, Amp Gain: {amp_gain}, Mic sensitivity: {mic_sens}, and Distance: {distance}\n")
+    print(f"The mic cal file is {args.mic_cal_file}")
+    
+    # form filenames for input files, using infile basename
+    measurement_filename = args.basename_infiles + "_m.wav"
+    impulse_filename = args.basename_infiles + "_h1.wav"
+    farina_filter_filename = args.basename_infiles + "_Fif.wav"
+    
+    # Read the measurement, Farina inverse filter, and stimulus data from their WAV files
     try:
-        # Read the raw microphone data, Farina inverse filter, and stimulus data
-        sample_rate, mic_data, measurement_metadata = read_wav_file_plus_info(args.measurement_datafile)
-        FF_sample_rate, inv_filter, FF_metadata = read_wav_file_plus_info(args.farina_filterfile)
-        H1_sample_rate, h1_impulse, impulse_metadata = read_wav_file_plus_info(args.impulse_datafile)
+        sample_rate, mic_data, measurement_metadata = read_wav_file_plus_info(measurement_filename)
+        H1_sample_rate, h1_impulse, impulse_metadata = read_wav_file_plus_info(impulse_filename)
+        FF_sample_rate, inv_filter, FF_metadata = read_wav_file_plus_info(farina_filter_filename)
     except FileNotFoundError as e:
         print(f"Error: Required file not found - {e}")
         return
@@ -736,6 +757,7 @@ def main():
         measurement_start_freq = measurement_metadata.get("f0sw", 0.0)
         HF_window_startF = measurement_metadata.get("fhfw", 0.0)
         measurement_timestamp = datetime.fromtimestamp(measurement_metadata.get("date", 0))
+        RMS_internal_level = measurement_metadata.get("levl",0.0)
         # Print out validated parameters
         print(f"\n------------------------ Measurement Parameters: -------------------------------")
         print(f"             Start Frequency (f0sw): {measurement_metadata.get("f0sw", 0.0)} Hz")
@@ -746,6 +768,7 @@ def main():
         print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
         print(f"--------------------------------------------------------------------------------\n")
+
 
     # 1. Compute the full impulse response using Farina deconvolution
     print("Computing the time domain impulse response using the Farina method...")
@@ -776,11 +799,16 @@ def main():
     print(f"Sample Rate: {sample_rate} Hz | Duration of time data: {total_duration_ms/1000.0:.5f} seconds ({total_duration_ms:.2f} msec).\n")
     
     # Determine y-axis label for magnitude based on whether spl correction factor was supplied
-    if (
-        args.spl_correction_factor is not None
-        and args.mic_cal_file is not None
-    ):
+    if all(v > 0 for v in (v_in1_max, v_in2_max, amp_gain, mic_sens, distance, RMS_internal_level)) and args.mic_cal_file is not None:
         mag_ylabel = f"SPL [dB re 20 uPa @ 2.83V/1m" 
+        # Calculate the SPL correction factor, Vdrive = RMS_internal_level * v_in1_max
+        SPL_factor = 0.001 * mic_sens
+        SPL_factor *= distance 
+        SPL_factor *= ( v_in2_max / v_in1_max )
+        SPL_factor *= 2.83
+        SPL_factor /= RMS_internal_level * v_in1_max
+        SPL_factor /= 20e-6
+        print(f"The SPL conversion factor is {SPL_factor}")
     else:
         mag_ylabel = "Relative SPL [dB"
     mag_ylabel += "]"
@@ -978,7 +1006,7 @@ def main():
                     return
                 state['hd_max'] = val
                 user_message = f"A new HD MAX of {state['hd_max']} was provided.\n" 
-                user_message += "Press Compute/Clear to clear the data and then again to show the new results."
+                user_message += "Press Compute/Clear to clear the data and then again to show the new results.\n"
                 print(user_message)
                 show_notification("Error", user_message)
                 state['selected_harmonic'] = 'H1'
@@ -1350,11 +1378,10 @@ def main():
             
             # Apply SPL corrections:
             mic_cal_file = getattr(args, 'mic_cal_file', None)
-            K = getattr(args, 'spl_correction_factor', None)
 
-            # Convert the linear system factor K into a decibel offset
-            if K is not None and K > 0:
-                spl_offset_db = 20 * np.log10(K)
+            # Convert the SPL correction factor into a decibel offset
+            if SPL_factor is not None and SPL_factor > 0:
+                spl_offset_db = 20 * np.log10(SPL_factor)
             else:
                 spl_offset_db = 0.0
 
@@ -1500,8 +1527,7 @@ def main():
             return
             
         # Ensure the destination directory exists if base_name includes a path
-        import os
-        save_dir = os.path.dirname(args.basename)
+        save_dir = os.path.dirname(args.basename_outfiles)
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
             
@@ -1510,7 +1536,7 @@ def main():
         else:
             print(f"Saving FRD data files...")
         res = state['smoothed_harmonic_results']
-        base_name = args.basename  
+        base_name = args.basename_outfiles  
         
         for k in range(1, state['hd_max'] + 1):
             if k in res:
