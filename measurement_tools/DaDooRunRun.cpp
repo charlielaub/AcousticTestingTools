@@ -392,15 +392,12 @@ uint32_t get_current_timestamp_32() {
             f1sw <> args.end_freq
             fhfw <> args.HF_window_startF
             rchr <> args.chirp_rate
-            levl <> args.level
+            levl <> args.level  NOTE: here level is the measured stimulus level
             date <> args.timestamp
    If the filepathname contains a directory that does not exist, it will be created.
 */    
-bool write_wav_file_plus_info(AppArgs& args, const std::string& filetype, const std::vector<float>& data) {
+bool write_wav_file_plus_info(AppArgs& args, const std::string& filename, const std::vector<float>& data) {
     namespace fs = std::filesystem;
-
-    // Construct filename using basefilename and the provided filetype suffix
-    std::string filename = args.basefilename + "_" + filetype + ".wav";
 
     // 1. Ensure the destination directory exists if a path is included
     try {
@@ -1595,6 +1592,9 @@ int main(int argc, char* argv[]) {
     // Generate a chirp to be played as the system stimulus
     std::vector<float> chirp = generate_log_chirp(args); 
 
+    //Generate the Farina Inverse Filter
+    std::vector<float> inv_filter = generate_Farina_inverse_filter(args);
+
     // Collect raw measurement data from hardware
     DataContainer raw_data = perform_acoustic_measurement(args, chirp);
     if (raw_data.stimulus_data.empty()) {
@@ -1636,44 +1636,43 @@ int main(int argc, char* argv[]) {
     args.timestamp = get_current_timestamp_32();
 
     std::cout << "\n--- Saving Data Files ---\n";
-    std::string filetype;
+    std::string filetype_extension;
     std::string filename;
 
-    //Write measurement data as WAV file
-    filetype = "m";
-    filename = args.basefilename + filetype + ".wav";
-    if (write_wav_file_plus_info(args, filetype, averaged_mic)) {
+    //Save measurement data as WAV file
+    filetype_extension = "_m";
+    filename = args.basefilename + filetype_extension + ".wav";
+    if (write_wav_file_plus_info(args, filename, averaged_mic)) {
         std::cout << "Measurement data WAV file and custom xDAT metadata written to the file " << filename << "\n";
     } else {
         std::cerr << "Failure: An error occurred while attempting to write the measurement WAV file.\n";
         return -1; // Optional: exit with error code
     }
 
-    //Write stimulus data as WAV file
-    filetype = "s";
-    filename = args.basefilename + filetype + ".wav";
-    if (write_wav_file_plus_info(args, filetype, chirp)) {
+    //Save stimulus data as WAV file
+    filetype_extension = "_s";
+    filename = args.basefilename + filetype_extension + ".wav";
+    if (write_wav_file_plus_info(args, filename, chirp)) {
         std::cout << "Stimulus WAV file and custom xDAT metadata written to the file " << filename << "\n";
     } else {
         std::cerr << "Failure: An error occurred while attempting to write the stimulus WAV file.\n";
         return -1; // Optional: exit with error code
     }
 
-    //Write H1 time domain response to WAV file
-    filetype = "h1";
-    filename = args.basefilename + filetype + ".wav";
-    if (write_wav_file_plus_info(args, filetype, h1_ir)) {
+    //Save H1 time domain response to WAV file
+    filetype_extension = "_h1";
+    filename = args.basefilename + filetype_extension + ".wav";
+    if (write_wav_file_plus_info(args, filename, h1_ir)) {
         std::cout << "Impulse response WAV file and custom xDAT metadata written to the file " << filename << "\n";
     } else {
         std::cerr << "Failure: An error occurred while attempting to write the impulse response WAV file.\n";
         return -1; // Optional: exit with error code
     }
 
-    //Generate and save the Farina Inverse Filter as WAV file
-    std::vector<float> inv_filter = generate_Farina_inverse_filter(args);
-    filetype = "Fif";
-    filename = args.basefilename + filetype + ".wav";
-    if (write_wav_file_plus_info(args, filetype, inv_filter)) {
+    //Save the Farina Inverse Filter as WAV file
+    filetype_extension = "_Fif";
+    filename = args.basefilename + filetype_extension + ".wav";
+    if (write_wav_file_plus_info(args, filename, inv_filter)) {
         std::cout << "Farina inverse filter WAV file and custom xDAT metadata written to the file " << filename << "\n";
     } else {
         std::cerr << "Failure: An error occurred while attempting to write the Farina inverse filter WAV file.\n";

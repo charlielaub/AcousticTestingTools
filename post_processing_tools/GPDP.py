@@ -248,10 +248,10 @@ def main():
 
         # Route execution based on the chosen calculation type
         if args.calc_type == 1:
-            print(f"Calculating the Groundplane Transfer Function from files {file1} and {file2}")
+            print(f"Calculating the Groundplane Transfer Function from files {args.infile1} and {args.infile2}")
             print(f"Performing the calculation: RESULT = FILE1 / FILE2 - 1")
             result_complex = file1_pressure / file2_pressure - 1.0
-            message = f"The Groundplane Transfer function will now be saved to the file {args.file2}."
+            message = f"The Groundplane Transfer function will now be saved to the file {args.outfile}."
         elif args.calc_type == 2:
             print(f"Calculating the Free-Field Response from the Lift and Tuck Data in {args.infile1} using the Groundplane Transfer Function in {args.infile2}")
             print(f"Performing calculation: RESULT = FILE1 / (1 + FILE2)")

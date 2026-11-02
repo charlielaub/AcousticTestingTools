@@ -28,6 +28,7 @@ import struct
 from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox
+from scipy.interpolate import Akima1DInterpolator
 
 
 
@@ -80,6 +81,11 @@ def parse_arguments():
             type=parse_inline_config,
             default={},
             help="String of the parameters used to set the SPL level: '-k V1=6.15, V2=2.45, Ag=20, Smic=0.01, d=0.25'"
+    )
+    parser.add_argument("--time_outfile", 
+            type=str, 
+            default=None,
+            help="File name for time domain response produce by the Farina deconvolution."
     )
     return parser.parse_args()
 
@@ -601,39 +607,119 @@ def Is_Consistent_Data(metadata_dicts, tolerance=1e-5):
 
 
 
-def read_mic_cal_file(filename, freqs):
+class MicCalibrationHandler:
     """
-    Reads a microphone calibration file (*.mic or *.cal) containing frequency (Hz) 
-    and correction (dB), and interpolates corrections to match the given FFT frequencies.
+    Loads a microphone calibration file once, computes trend lines for extrapolation,
+    and builds an Akima spline interpolator for efficient repeated evaluations.
     """
-    cal_freqs = []
-    cal_db = []
-    try:
-        with open(filename, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith(('*', '#', ';')):
-                    continue
-                parts = line.replace(',', ' ').split()
-                if len(parts) >= 2:
-                    try:
-                        f_val = float(parts[0])
-                        db_val = float(parts[1])
-                        cal_freqs.append(f_val)
-                        cal_db.append(db_val)
-                    except ValueError:
+    def __init__(self, filename):
+        self.filename = filename
+        self.is_valid = False
+        self.f_min = None
+        self.f_max = None
+        self.interpolator = None
+        self.poly_coeff_low = None
+        self.poly_coeff_high = None
+        self._load_and_setup()
+
+    def _load_and_setup(self):
+        cal_freqs = []
+        cal_db = []
+        try:
+            with open(self.filename, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith(('*', '#', ';')):
                         continue
-        if not cal_freqs:
-            print("Warning: Calibration file contained no valid data. No compensation applied.")
+                    parts = line.replace(',', ' ').split()
+                    if len(parts) >= 2:
+                        try:
+                            f_val = float(parts[0])
+                            db_val = float(parts[1])
+                            cal_freqs.append(f_val)
+                            cal_db.append(db_val)
+                        except ValueError:
+                            continue
+                            
+            if not cal_freqs:
+                print("Warning: Calibration file contained no valid data. No compensation applied.")
+                return
+                
+            cal_freqs = np.array(cal_freqs)
+            cal_db = np.array(cal_db)
+            
+            # Sort calibration data by frequency
+            sort_indices = np.argsort(cal_freqs)
+            cal_freqs = cal_freqs[sort_indices]
+            cal_db = cal_db[sort_indices]
+            
+            self.f_min = cal_freqs[0]
+            self.f_max = cal_freqs[-1]
+            
+            # Base Akima interpolator for the interior region (extrapolation disabled here)
+            self.interpolator = Akima1DInterpolator(cal_freqs, cal_db, extrapolate=False)
+            
+            # --- 1. Low-Frequency Trend Fit (< f_min) ---
+            low_data_mask = cal_freqs <= 100.0
+            if np.sum(low_data_mask) >= 2:
+                fit_freqs = cal_freqs[low_data_mask]
+                fit_db = cal_db[low_data_mask]
+            else:
+                n_pts = min(3, len(cal_freqs))
+                fit_freqs = cal_freqs[:n_pts]
+                fit_db = cal_db[:n_pts]
+            self.poly_coeff_low = np.polyfit(np.log10(fit_freqs), fit_db, 1)
+            
+            # --- 2. High-Frequency Trend Fit (> f_max) with 3-point moving average ---
+            hf_data_mask = cal_freqs >= 10000.0
+            if np.sum(hf_data_mask) >= 3:
+                fit_freqs = cal_freqs[hf_data_mask]
+                fit_db = cal_db[hf_data_mask]
+                
+                window_size = 3
+                weights = np.ones(window_size) / window_size
+                smoothed_db = np.convolve(fit_db, weights, mode='valid')
+                smoothed_freqs = np.convolve(fit_freqs, weights, mode='valid')
+            elif np.sum(hf_data_mask) >= 1:
+                smoothed_freqs = cal_freqs[hf_data_mask]
+                smoothed_db = cal_db[hf_data_mask]
+            else:
+                n_pts = min(3, len(cal_freqs))
+                smoothed_freqs = cal_freqs[-n_pts:]
+                smoothed_db = cal_db[-n_pts:]
+                
+            self.poly_coeff_high = np.polyfit(np.log10(smoothed_freqs), smoothed_db, 1)
+            self.is_valid = True
+            
+        except Exception as e:
+            print(f"Error reading microphone calibration file: {e}")
+            self.is_valid = False
+
+    def get_corrections(self, freqs):
+        """
+        Evaluates the pre-calculated Akima spline and extrapolation models for a given frequency array.
+        """
+        if not self.is_valid:
             return np.zeros_like(freqs)
             
-        cal_freqs = np.array(cal_freqs)
-        cal_db = np.array(cal_db)
-        corrections = np.interp(freqs, cal_freqs, cal_db, left=cal_db[0], right=cal_db[-1])
+        corrections = np.zeros_like(freqs, dtype=float)
+        
+        # 1. Low-Frequency Extrapolation (< f_min)
+        low_mask = freqs < self.f_min
+        if np.any(low_mask) and self.poly_coeff_low is not None:
+            corrections[low_mask] = np.polyval(self.poly_coeff_low, np.log10(freqs[low_mask]))
+        
+        # 2. High-Frequency Extrapolation (> f_max)
+        high_mask = freqs > self.f_max
+        if np.any(high_mask) and self.poly_coeff_high is not None:
+            corrections[high_mask] = np.polyval(self.poly_coeff_high, np.log10(freqs[high_mask]))
+            
+        # 3. Core Interior Range (f_min <= freqs <= f_max)
+        mid_mask = (freqs >= self.f_min) & (freqs <= self.f_max)
+        if np.any(mid_mask):
+            corrections[mid_mask] = self.interpolator(freqs[mid_mask])
+            
         return corrections
-    except Exception as e:
-        print(f"Error reading microphone calibration file: {e}")
-        return np.zeros_like(freqs)
 
 
 
@@ -670,6 +756,15 @@ def write_frd_file(filename, freqs, mag_db, phase_deg):
         print(f"   ...saved {filename}")
     except Exception as e:
         print(f"WARNING: The following error was encountered when attempting to save file {filename}: {e}")
+
+
+
+
+# Save data FLOAT32 WAV
+def save_wav(filename, sample_rate, data):
+    float_data = np.float32(data)
+    scipy.io.wavfile.write(filename, sample_rate, float_data)
+
 
 
 
@@ -774,6 +869,10 @@ def main():
     print("Computing the time domain impulse response using the Farina method...")
     full_ir = scipy.signal.fftconvolve(mic_data, inv_filter, mode='full')
     
+    #if time_outfile was provided, save the time domain response
+    if args.time_outfile is not None:
+        save_wav(args.time_outfile, sample_rate, full_ir)
+    
     print("Using the imported impulse response to correct the Farina time axis...")
     # Determine the sample index in full_ir corresponding to time = 0
     # Define the search bounds (middle 20% of full_ir) to isolate the main impulse
@@ -802,16 +901,23 @@ def main():
     if all(v > 0 for v in (v_in1_max, v_in2_max, amp_gain, mic_sens, distance, RMS_internal_level)) and args.mic_cal_file is not None:
         mag_ylabel = f"SPL [dB re 20 uPa @ 2.83V/1m" 
         # Calculate the SPL correction factor, Vdrive = RMS_internal_level * v_in1_max
-        SPL_factor = 0.001 * mic_sens
-        SPL_factor *= distance 
+        SPL_factor = distance / ( 0.001 * mic_sens ) 
         SPL_factor *= ( v_in2_max / v_in1_max )
         SPL_factor *= 2.83
-        SPL_factor /= RMS_internal_level * v_in1_max
-        SPL_factor /= 20e-6
-        print(f"The SPL conversion factor is {SPL_factor}")
+        SPL_factor /= ( RMS_internal_level * v_in1_max * amp_gain )
+        SPL_factor *= 50000.0
+        print(f"The SPL conversion factor is {SPL_factor:.3e}\n")
     else:
         mag_ylabel = "Relative SPL [dB"
     mag_ylabel += "]"
+
+
+    # Initialize the microphone calibration handler
+    mic_cal_handler = None
+    if args.mic_cal_file is not None:
+        mic_cal_handler = MicCalibrationHandler(args.mic_cal_file)
+        print(f"Using the microphone calibration data from {args.mic_cal_file}.\n")
+
     
     # Setup Figure and Subplots
     fig, (ax_time, ax_freq) = plt.subplots(2, 1, figsize=(10, 8.5))
@@ -858,7 +964,11 @@ def main():
         'resolution': None,
         'smoothing_octaves': 24,
         'last_smoothing_octaves': 24,
-        'HF_window_startF': HF_window_startF
+        'HF_window_startF': HF_window_startF,
+        'saved_limits': {        # <-- NEW: Explicitly store saved limits for FREQ and THD only
+            'FREQ': None,
+            'THD': None
+        }
     }
     
     initial_win = scipy.signal.get_window(('tukey', state['tukey_alpha']), initial_gate_idx)
@@ -900,10 +1010,6 @@ def main():
     # Optional: Clean minor ticks handled automatically
     ax_freq.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
 
-    #initialize old_xlim
-    old_xlim = ax_freq.get_xlim()
-
-    
     # Button Axes
     btn_y = 0.03
     btn_h = 0.04
@@ -948,6 +1054,49 @@ def main():
     textbox_dataset = TextBox(ax_box_dataset, '', initial=state['selected_harmonic'], textalignment='center')
     textbox_dataset.set_active(False)
     btn_next = Button(ax_btn_next, r'$\blacktriangleright$', color='aliceblue', hovercolor='palegreen')
+
+
+
+
+
+    # Create the button axes initially using ax_freq's bounding box
+    pos = ax_freq.get_position()
+    btn_w, btn_h = 0.025, 0.025  # Button width and height as fraction of figure
+    
+    # Position so its top-right aligns with ax_freq's top-right
+    ax_btn_plus = fig.add_axes([pos.x1 - btn_w, pos.y1 - btn_h, btn_w, btn_h])
+    btn_plus = Button(ax_btn_plus, '+', color='aliceblue', hovercolor='palegreen')
+    
+    # Define a callback to keep it locked to the corner during window resizes
+    def update_plus_button_position(event=None):
+        p = ax_freq.get_position()
+        ax_btn_plus.set_position([p.x1 - btn_w, p.y1 - btn_h, btn_w, btn_h])
+
+    # Connect the resize event to the callback
+    fig.canvas.mpl_connect('resize_event', update_plus_button_position)
+
+    def handle_plus_button(event):
+        # Do nothing if no data is currently plotted
+        if state['smoothed_harmonic_results'] is None:
+            return
+            
+        current_sel = state['selected_harmonic']
+        current_phase = state['showing_phase']
+        k_idx = int(current_sel[1:]) if len(current_sel) > 1 and current_sel[1:].isdigit() else 1
+        
+        # Only active for FREQ (H1 magnitude) or THD views
+        if not current_phase and (current_sel == 'THD' or k_idx == 1):
+            key = 'THD' if current_sel == 'THD' else 'FREQ'
+            state['saved_limits'][key] = (ax_freq.get_xlim(), ax_freq.get_ylim())
+            print(f"Custom axis limits saved for {key} plot.")
+            show_notification("Limits Saved", f"Custom axis limits saved for {key} plot.")
+            
+    # Ensure this is called strictly ONCE during initialization
+    btn_plus.on_clicked(handle_plus_button)
+
+
+
+
 
     def get_harmonic_list():
         h_list = [f"H{i}" for i in range(1, state['hd_max'] + 1)]
@@ -1150,29 +1299,36 @@ def main():
 
         results = state['smoothed_harmonic_results']
         sel = current_sel
-        
-        # 1. Capture current X-axis limit (to preserve frequency zoom across views)
-        try:
-            old_xlim = ax_freq.get_xlim()
-        except Exception:
-            old_xlim = None
+
+        # Determine k_idx early so we can check button visibility eligibility
+        k_idx = int(sel[1:]) if len(sel) > 1 and sel[1:].isdigit() else 1
+
+        # Manage '+' button visibility: Only show for FREQ (H1 magnitude) or THD views
+        if 'ax_btn_plus' in locals() or 'ax_btn_plus' in globals():
+            if not current_phase and (sel == 'THD' or k_idx == 1):
+                ax_btn_plus.set_visible(True)
+            else:
+                ax_btn_plus.set_visible(False)
+            fig.canvas.draw_idle()
 
         # Clear the axis and set up grid / scale
         ax_freq.clear()
         ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
         ax_freq.set_xscale('log')
 
-        # 2. Extract data and mask out NaNs from mag_db to get valid x-values for xmax
+        # 1. Extract data and mask out NaNs from mag_db to get valid x-values for xmax
         freqs = np.array(results[1]['freqs'])
         mag_db = np.array(results[1]['mag_db'])
 
         valid_mask = ~np.isnan(mag_db)
         x_masked = freqs[valid_mask]
-        xmax = max(x_masked)
+        xmax = max(x_masked) if len(x_masked) > 0 else 20000.0
         xmax = min(xmax, state['HF_window_startF'])
 
-        # 3. Get the minimum resolution frequency from state & generate master ticks
+        # 2. Get the minimum resolution frequency from state & generate master ticks
         res_min = state["resolution"]
+        if res_min is None or res_min <= 0:
+            res_min = 20.0
 
         start_decade = int(np.floor(np.log10(res_min))) - 1
         end_decade = int(np.ceil(np.log10(xmax)))
@@ -1184,21 +1340,17 @@ def main():
             for m in multipliers:
                 master_ticks.append(m * (10 ** d))
 
-        # Lower bound: largest master tick <= res_min (tick just below data start)
         valid_lower_ticks = [t for t in master_ticks if t <= res_min]
         xmin_temp = max(valid_lower_ticks) if valid_lower_ticks else res_min
 
-        # Upper bound: smallest master tick >= xmax (next tick *above* last data point)
         valid_upper_ticks = [t for t in master_ticks if t >= xmax]
         xmax_temp = min(valid_upper_ticks) if valid_upper_ticks else xmax
 
-        # Filter active ticks inclusively between the lower and upper buffer ticks
         active_ticks = [t for t in master_ticks if xmin_temp <= t <= xmax_temp]
 
-        # 4. Apply custom ticks and formatting first
+        # 3. Apply custom ticks and formatting
         ax_freq.set_xticks(active_ticks)
         
-        # Major ticks: Use smart 'k' formatting for thousands, standard numbers below
         def freq_formatter(x, pos):
             if x >= 1000:
                 return f"{int(x // 1000)}k" if x % 1000 == 0 else f"{x / 1000:g}k"
@@ -1207,7 +1359,6 @@ def main():
                 
         ax_freq.xaxis.set_major_formatter(ticker.FuncFormatter(freq_formatter))
         
-        # Define a smart dynamic formatter for minor ticks
         def smart_minor_formatter(x, pos):
             xlim = ax_freq.get_xlim()
             if xlim[0] > 0 and xlim[1] > 0:
@@ -1218,7 +1369,6 @@ def main():
             if span_decades > 1.5:
                 return ""
             
-            # Apply 'k' formatting to minor ticks too if they exceed 1000
             if x >= 1000:
                 return f"{int(x // 1000)}k" if x % 1000 == 0 else f"{x / 1000:g}k"
             else:
@@ -1227,23 +1377,7 @@ def main():
         ax_freq.xaxis.set_minor_formatter(ticker.FuncFormatter(smart_minor_formatter))
         ax_freq.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
 
-        # 5. Handle X-axis limits (preserve user zoom or snap neatly to custom ticks)
-        is_default_limit = (not old_xlim) or (old_xlim == (0.0, 1.0)) or (abs(old_xlim[0] - 20.0) < 0.1 and abs(old_xlim[1] - 20000.0) < 1.0)
-
-        if not is_default_limit:
-            # User has actively zoomed in! Respect their zoom range.
-            ax_freq.set_xlim(old_xlim)
-        else:
-            # Default state: Snap to your custom active ticks range
-            if active_ticks:
-                xmin_val = float(active_ticks[0])
-                xmax_val = float(active_ticks[-1])
-                ax_freq.set_xlim(xmin_val, xmax_val)
-            else:
-                ax_freq.set_xlim(20.0, 20000.0)
-
-        # Define k_idx so it is available for BOTH phase and magnitude views
-        k_idx = int(sel[1:]) if len(sel) > 1 and sel[1:].isdigit() else 1
+        mag_data_for_scaling = None
 
         if current_phase:
             # --- PHASE VIEW BRANCH ---
@@ -1254,8 +1388,6 @@ def main():
             else:
                 if k_idx <= state['hd_max']:
                     raw_phase = results[k_idx]['min_phase'] if state['using_min_phase'] else results[k_idx]['phase']
-                    
-                    # Wrap phase into the [-180, 180] degree range
                     current_phase_data = (raw_phase + 180) % 360 - 180
 
                     title_label = f"Harmonic {k_idx} - {'Minimum Phase' if state['using_min_phase'] else 'Phase'}"
@@ -1266,8 +1398,8 @@ def main():
         else:
             # --- MAGNITUDE VIEW BRANCH ---
             if sel == 'ALL':
-                freqs = results[1]['freqs']
-                line1, = ax_freq.plot(freqs, results[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
+                freqs_all = results[1]['freqs']
+                line1, = ax_freq.plot(freqs_all, results[1]['mag_db'], color='r', lw=1.2, label='H1 ')
                 lines = [line1]
                 colors = ['blue', 'tomato', 'green', 'black', 'aqua', 'blueviolet', 'peru', 'deeppink']
                 for idx, k in enumerate(range(2, state['hd_max'] + 1)):
@@ -1279,17 +1411,9 @@ def main():
                 ax_freq.set_title("Frequency Domain Data - All Harmonics Magnitude")
                 state['freq_line_plot'] = lines
             elif sel == 'THD':
-                freqs = results[1]['freqs']
+                freqs_thd = results[1]['freqs']
                 thd_data = results['thd_percent']
-                line, = ax_freq.plot(freqs, thd_data, color='blue', lw=1.2)
-                
-                # Set the plot y-axis minimum to zero 
-                ax_freq.set_ylim(bottom=0)
-                
-                valid_max = np.nanmax(thd_data) if not np.isnan(thd_data).all() else 10.0
-                upper_limit = max( min(10.0, valid_max), 1.0)
-                
-                ax_freq.set_ylim(top=upper_limit)
+                line, = ax_freq.plot(freqs_thd, thd_data, color='blue', lw=1.2)
                 
                 ax_freq.set_ylabel("THD (%)")
                 ax_freq.set_title("Total Harmonic Distortion (THD)")
@@ -1310,10 +1434,43 @@ def main():
                     ax_freq.set_ylabel(ylabel_str)
                     ax_freq.set_title(title_str)
                     state['freq_line_plot'] = [line]
+                    mag_data_for_scaling = mag_data
+
+            # Check if user explicitly saved limits via the '+' button for FREQ or THD
+            active_limit_key = 'THD' if sel == 'THD' else ('FREQ' if k_idx == 1 else None)
+            saved_lims = state['saved_limits'].get(active_limit_key) if active_limit_key else None
+
+            if saved_lims is not None:
+                # Apply user's explicitly saved limits
+                ax_freq.set_xlim(saved_lims[0])
+                ax_freq.set_ylim(saved_lims[1])
+            else:
+                # Fallback to default sizing rules
+                if active_ticks:
+                    ax_freq.set_xlim(float(active_ticks[0]), float(active_ticks[-1]))
+                else:
+                    ax_freq.set_xlim(20.0, 20000.0)
+
+                if sel == 'THD':
+                    ax_freq.set_ylim(bottom=0)
+                    valid_max = np.nanmax(thd_data) if not np.isnan(thd_data).all() else 10.0
+                    upper_limit = max(min(10.0, valid_max), 1.0)
+                    ax_freq.set_ylim(top=upper_limit)
+                elif mag_data_for_scaling is not None:
+                    valid_mag = mag_data_for_scaling[~np.isnan(mag_data_for_scaling)]
+                    data_max = np.max(valid_mag) if len(valid_mag) > 0 else 0.0
+                    
+                    y_max = np.ceil(data_max / 5.0) * 5.0
+                    y_min = y_max - 50.0
+                    
+                    ax_freq.set_ylim(y_min, y_max)
+                    ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(10))
+                    ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(5))
+                    ax_freq.grid(True, which='major', linestyle='-', linewidth=0.75)
+                    ax_freq.grid(True, which='minor', linestyle=':', linewidth=0.5)
 
             ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
 
-        # 6. Refresh canvas
         fig.canvas.draw_idle()
 
     def handle_calc_button(event):
@@ -1356,6 +1513,11 @@ def main():
             state['smoothed_harmonic_results'] = None
             state['resolution'] = None
             print("All calculated data cleared.\n")
+            
+            #clear state variable that store plot limits
+            state['smoothed_harmonic_results'] = None
+            state['resolution'] = None
+            state['saved_limits'] = {'FREQ': None, 'THD': None} # <-- Reset saved limits on clear
         else:
             print(f"Computing Farina Method response up to HD {state['hd_max']}...")
             
@@ -1376,9 +1538,7 @@ def main():
                 max_harmonic=state['hd_max']
             )
             
-            # Apply SPL corrections:
-            mic_cal_file = getattr(args, 'mic_cal_file', None)
-
+            # Apply SPL corrections: ==============================================
             # Convert the SPL correction factor into a decibel offset
             if SPL_factor is not None and SPL_factor > 0:
                 spl_offset_db = 20 * np.log10(SPL_factor)
@@ -1399,14 +1559,15 @@ def main():
                 # 1. Apply the system SPL correction factor
                 mag_db += spl_offset_db
                 
-                # 2. Apply the microphone calibration corrections if a file was provided
-                if mic_cal_file is not None:
-                    cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
+                # 2. Apply the microphone calibration corrections using the pre-loaded handler
+                if mic_cal_handler is not None and mic_cal_handler.is_valid:
+                    cal_corrections = mic_cal_handler.get_corrections(freqs)
                     mag_db -= np.asarray(cal_corrections, dtype=float)
                     
                 # Update the dictionary with the fully calibrated magnitude data
                 harmonic_data['mag_db'] = mag_db            
             
+            # Done applying SPL corections ========================================
 
             #calculate the THD in percent and add it to the dictionary
             results = compute_thd_percent( results )
@@ -1606,6 +1767,13 @@ def main():
             ax.xaxis.set_major_formatter(ticker.FuncFormatter(freq_formatter))
             ax.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
 
+        # Clean and sanitize base_name to remove any trailing whitespace or hidden characters
+        clean_base_name = base_name.strip()
+        save_dir = os.path.dirname(clean_base_name)
+        file_prefix = os.path.basename(clean_base_name)
+        
+        freq_path = os.path.join(save_dir, f"{file_prefix}_FREQ.png") if save_dir else f"{file_prefix}_FREQ.png"
+
         # Plot A: Fundamental Magnitude (_FREQ.png)
         fig_freq, ax_f = plt.subplots(figsize=(11, 5))
         ax_f.plot(res[1]['freqs'], res[1]['mag_db'], color='r', lw=1.2)
@@ -1613,7 +1781,35 @@ def main():
         ax_f.set_xlabel("Frequency (Hz)")
         ax_f.set_ylabel(mag_ylabel)
         apply_custom_scaling_and_ticks(ax_f)
-        fig_freq.savefig(f"{base_name}_FREQ.png", dpi=600, bbox_inches='tight')
+        
+        # 1. Determine upper and lower bounds based on your formatting rules
+        data_max = np.nanmax(res[1]['mag_db'])  # Ignores NaN masked values safely
+        
+        if np.isnan(data_max):
+            data_max = 0.0  # Fallback just in case all points are NaN
+            
+        # Snap y_max up to the nearest multiple of 5
+        y_max = np.ceil(data_max / 5.0) * 5.0
+        
+        # Maintain a total y-range of 50
+        y_min = y_max - 50.0          
+        
+        # 2. Apply the limits to the frequency axis
+        ax_f.set_ylim(y_min, y_max)
+
+        # 3. Configure major (10) and minor (5) divisions
+        ax_f.yaxis.set_major_locator(ticker.MultipleLocator(10))
+        ax_f.yaxis.set_minor_locator(ticker.MultipleLocator(5))
+
+        # 4. Turn on the grid lines to visualize the divisions
+        ax_f.grid(True, which='major', linestyle='-', linewidth=0.75)
+        ax_f.grid(True, which='minor', linestyle=':', linewidth=0.5)
+        
+        if state['saved_limits']['FREQ'] is not None:
+            ax_f.set_xlim(state['saved_limits']['FREQ'][0])
+            ax_f.set_ylim(state['saved_limits']['FREQ'][1])
+        
+        fig_freq.savefig(freq_path, dpi=600, bbox_inches='tight')
         plt.close(fig_freq)
 
         # Plot B: Fundamental Phase (_PHASE.png)
@@ -1653,6 +1849,9 @@ def main():
         ax_t.set_xlabel("Frequency (Hz)")
         ax_t.set_ylabel("THD (%)")
         apply_custom_scaling_and_ticks(ax_t)
+        if state['saved_limits']['THD'] is not None:
+            ax_t.set_xlim(state['saved_limits']['THD'][0])
+            ax_t.set_ylim(state['saved_limits']['THD'][1])
         fig_thd.savefig(f"{base_name}_THD.png", dpi=600, bbox_inches='tight')
         plt.close(fig_thd)
 

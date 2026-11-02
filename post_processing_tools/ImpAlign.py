@@ -13,6 +13,7 @@ import scipy.io.wavfile as wav        #the scipy module must be installed
 from scipy.signal import correlate
 import argparse, textwrap
 
+
 def read_wav_file(file_path):
     """
     Reads a WAV file, forces it to floating-point representation,
@@ -30,10 +31,12 @@ def read_wav_file(file_path):
         
     return fs, data
 
+
 def calculate_subsample_offset(data_master, data_slave, fs, max_window_us=500.0):
     """
     Computes cross-correlation restricted to a specific time window,
-    protects boundaries, and applies a quadratic fit to find sub-sample alignment.
+    handles polarity inversions, protects boundaries, and applies 
+    Gaussian (log-quadratic) interpolation for unbiased sub-sample alignment.
     """
     # Calculate max lag samples based on sampling rate
     max_lag_samples = int(np.ceil(max_window_us * 1e-6 * fs))
@@ -47,24 +50,56 @@ def calculate_subsample_offset(data_master, data_slave, fs, max_window_us=500.0)
     corr_window = corr[valid_window_mask]
     lags_window = lags[valid_window_mask]
     
-    # Find peak index relative to the restricted window slice
+    # Find peak index relative to the restricted window slice (using abs for initial search)
     peak_idx_in_window = np.argmax(np.abs(corr_window))
     coarse_lag = lags_window[peak_idx_in_window]
     
     # Boundary Protection: Safely extract neighbor indices from global array
     global_peak_idx = int(np.where(lags == coarse_lag)[0][0])
     
-    # Extract three points surrounding the peak for quadratic interpolation
+    if global_peak_idx <= 0 or global_peak_idx >= len(corr) - 1:
+        print("Warning: Correlation peak hit array boundary. Skipping sub-sample interpolation.")
+        return float(coarse_lag), coarse_lag, 0.0, max_lag_samples, lags, corr, global_peak_idx
+
+    # Extract three points surrounding the peak
     y1 = corr[global_peak_idx - 1]
     y2 = corr[global_peak_idx]
     y3 = corr[global_peak_idx + 1]
     
-    # Vertex interpolation formula
-    fine_offset = 0.5 * (y1 - y3) / (y1 - 2 * y2 + y3)
+    # --- Robustness Against Polarity Inversion ---
+    # If the peak is a negative trough, log-interpolation requires positive values.
+    # We track the polarity sign and temporarily flip if necessary.
+    polarity = 1.0
+    if y2 < 0:
+        polarity = -1.0
+        y1, y2, y3 = -y1, -y2, -y3
+
+    # Ensure no zero or negative values before taking natural logarithm
+    if y1 <= 0 or y2 <= 0 or y3 <= 0:
+        print("Warning: Non-positive correlation values near peak. Falling back to coarse lag.")
+        return float(coarse_lag), coarse_lag, 0.0, max_lag_samples, lags, corr, global_peak_idx
+
+    # --- Gaussian Interpolation (Log-Quadratic Fit) ---
+    # Taking the natural log transforms a Gaussian/bell-shaped peak into a true parabola
+    ln_y1 = np.log(y1)
+    ln_y2 = np.log(y2)
+    ln_y3 = np.log(y3)
+    
+    denominator = ln_y1 - (2 * ln_y2) + ln_y3
+    if denominator == 0:
+        fine_offset = 0.0
+    else:
+        # Vertex formula applied to log-transformed values
+        fine_offset = 0.5 * (ln_y1 - ln_y3) / denominator
+        
+    # Clamp fine_offset defensively to ensure it doesn't wander beyond +/- 0.5 samples
+    fine_offset = np.clip(fine_offset, -0.5, 0.5)
+    
     exact_lag_samples = coarse_lag + fine_offset
     
     # Return metrics along with correlation data needed for visualization
     return exact_lag_samples, coarse_lag, fine_offset, max_lag_samples, lags, corr, global_peak_idx
+
 
 def apply_fourier_shift(data_slave, exact_lag_samples):
     """
