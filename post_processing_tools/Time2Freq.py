@@ -869,7 +869,7 @@ def main():
         print(f"               End Frequency (f1sw): {measurement_metadata.get("f1sw", 0.0)} Hz")
         print(f"                  Chirp Rate (rchr): {measurement_metadata.get("rchr", 0.0)} seconds/decade Hz")
         print(f"                 Repetitions (reps): {measurement_metadata.get("reps", 1)}")
-        print(f"              Internal Level (levl): {measurement_metadata.get("levl", 0.0)}")
+        print(f"              Internal Level (levl): {measurement_metadata.get("levl", 0.0):.3e}")
         print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"--------------------------------------------------------------------------------\n\n")
         print("Exiting Program.")
@@ -885,7 +885,7 @@ def main():
         print(f"               End Frequency (f1sw): {measurement_metadata.get("f1sw", 0.0)} Hz")
         print(f"                  Chirp Rate (rchr): {measurement_metadata.get("rchr", 0.0)} seconds/decade Hz")
         print(f"                 Repetitions (reps): {measurement_metadata.get("reps", 1)}")
-        print(f"              Internal Level (levl): {measurement_metadata.get("levl", 0.0)}")
+        print(f"              Internal Level (levl): {measurement_metadata.get("levl", 0.0):.3e}")
         print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
         print(f"--------------------------------------------------------------------------------\n")
@@ -893,8 +893,8 @@ def main():
 
     # State variables
     state = {
-        'gate_idx': initial_gate_idx,            
-        'gate_start_idx': initial_start_idx,
+        'gate_idx': None,            
+        'gate_start_idx': None,
         'user_has_set_gate': False,    
         'selecting_gate_step': 0,               
         'temp_start_time_ms': 0.0,              
@@ -995,6 +995,9 @@ def main():
     initial_start_idx = t0_sample_index
     initial_gate_time_ms = 20.0
     initial_gate_idx = t0_sample_index + int( initial_gate_time_ms * sample_rate / 1000.0 )
+    state['gate_idx'] = initial_gate_idx            
+    state['gate_start_idx'] = initial_start_idx
+
 
     # Add lines for both start and end gates
     start_line = ax_time.axvline(x=initial_start_time_ms, color='orange', linestyle='--', lw=1.5, label='Window Start')

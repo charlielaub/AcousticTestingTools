@@ -79,7 +79,7 @@ struct AppArgs {
     float start_freq = 10.0f;
     float end_freq = 0.99f * 0.5 * sample_rate;
     float HF_window_startF = 0.975f * end_freq;
-    int repetitions = 1;
+    int num_reps = 1;
     float alignment_window = 5.0f;
     float warm_up_delay = 3.0f;
     float rt60 = 3.0f;
@@ -105,7 +105,7 @@ struct AppArgs {
         std::cout << std::setw(name_width) << "sample rate"          << " : " << sample_rate << " Hz\n";
         std::cout << std::setw(name_width) << "chirp rate"           << " : " << chirp_rate << " seconds per decade Hz\n";
         std::cout << std::setw(name_width) << "start freq"           << " : " << start_freq << " Hz\n";
-        std::cout << std::setw(name_width) << "repetitions"          << " : " << repetitions << "\n";
+        std::cout << std::setw(name_width) << "num_reps"             << " : " << num_reps << "\n";
         std::cout << std::setw(name_width) << "alignment window"     << " : " << alignment_window << " milliseconds\n";
         std::cout << std::setw(name_width) << "warm up delay"        << " : " << warm_up_delay << " seconds\n";
         std::cout << std::setw(name_width) << "room decay time"      << " : " << rt60 << " seconds\n";
@@ -124,7 +124,6 @@ struct AppArgs {
 };
 
 
-
 // Display Usage / Help Information
 void show_help_info(const char* prog_name) {
     std::cout << "Acoustic Testing Measurement Tool\n\n"
@@ -134,11 +133,11 @@ void show_help_info(const char* prog_name) {
               << "  --level, -l <float>                 RMS stimulus level in dB <= 0.0 (default: -10.0)\n"
               << "  --sample_rate, -r <int>             Sampling rate in Hz (default: 48000)\n"
               << "  --chirp_rate, -c <float>            Chirp rate in seconds per decade of frequency (default: 2.0)\n"
-              << "  --start_freq, -s <float>            Start frequency in Hz (default: 1.0)\n"
-              << "  --repetitions, -n <int>             Number of measurement runs (default: 1)\n"
+              << "  --start_freq, -s <float>            Start frequency in Hz (default: 10.0)\n"
+              << "  --num_reps, -n <int>                Number of measurement repetitions (default: 1)\n"
               << "  --alignment_window <float>          Cross-Correlation Alignment Window in milliseconds (default: 5.0)\n"
               << "  --warm_up_delay <float>             Length of DAC warm-up delay in seconds (default: 3.0)\n"
-              << "  --rt60 <float>                      Room decay time in seconds (default: 3.0)\n"
+              << "  --rt60, -t <float>                  Room decay time in seconds (default: 3.0)\n"
               << "  --mean_wait, -w <float>             Average pause between runs in seconds (default: 3.0)\n"
               << "  --api_idx, -a <int>                 PortAudio host API index\n"
               << "  --input_device_idx, -i <int>        PortAudio hardware input device index\n"
@@ -221,9 +220,9 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateInt(arg, argv[++i], args.sample_rate, 1)) std::exit(1);
         }
-        else if (arg == "--repetitions" || arg == "-n") {
+        else if (arg == "--num_reps" || arg == "-n") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
-            if (!parseAndValidateInt(arg, argv[++i], args.repetitions, 1)) std::exit(1);
+            if (!parseAndValidateInt(arg, argv[++i], args.num_reps, 1)) std::exit(1);
         }
         
         // --- Strictly positive floats (> 0.0) ---
@@ -243,7 +242,7 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateFloat(arg, argv[++i], args.warm_up_delay, true)) std::exit(1);
         }
-        else if (arg == "--rt60") {
+        else if (arg == "--rt60" || arg == "-t") {
             if (i + 1 >= argc) { std::cerr << "Error: Missing value for " << arg << "\n"; std::exit(1); }
             if (!parseAndValidateFloat(arg, argv[++i], args.rt60, true)) std::exit(1);
         }
@@ -481,7 +480,7 @@ bool write_wav_file_plus_info(AppArgs& args, const std::string& filename, const 
     write_field("rchr", args.chirp_rate);
     write_field("levl", args.level);
     write_field_u32("date", args.timestamp);
-    write_field_u32("reps", static_cast<uint32_t>(args.repetitions));
+    write_field_u32("reps", static_cast<uint32_t>(args.num_reps));
 
     file.close();
     return file.good();
@@ -1270,8 +1269,8 @@ DataContainer perform_acoustic_measurement(AppArgs& args, const std::vector<floa
     if (pa_out_channels < 2) pa_out_channels = 2;
     if (pa_in_channels < 2)  pa_in_channels  = 2;
 
-    std::vector<std::vector<float>> ref_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
-    std::vector<std::vector<float>> mic_history(args.repetitions, std::vector<float>(total_samples, 0.0f));
+    std::vector<std::vector<float>> ref_history(args.num_reps, std::vector<float>(total_samples, 0.0f));
+    std::vector<std::vector<float>> mic_history(args.num_reps, std::vector<float>(total_samples, 0.0f));
 
     // Generate probe signal & allocate recording buffers for latency calibration
     std::vector<float> pure_probe = generate_probe_signal(args.sample_rate, 5.0f, args.level);
@@ -1288,7 +1287,7 @@ DataContainer perform_acoustic_measurement(AppArgs& args, const std::vector<floa
         isAsio ? 1 : args.in_channels[1],
         MeasurementContext::WARMUP,
         pure_probe, probe_ref_record, probe_mic_record, static_cast<int>(pure_probe.size()),
-        0, args.repetitions,
+        0, args.num_reps,
         static_cast<long long>(args.warm_up_delay * args.sample_rate),
         0, 0
     };
@@ -1368,7 +1367,7 @@ DataContainer perform_acoustic_measurement(AppArgs& args, const std::vector<floa
     float max_variation = args.mean_wait * 0.10f;
     float actual_wait;
 
-    for (int r = 0; r < args.repetitions; ++r) {
+    for (int r = 0; r < args.num_reps; ++r) {
         std::uniform_real_distribution<float> dis(-max_variation, max_variation);
         actual_wait = args.mean_wait + dis(gen);
         std::cout << "Pausing " << actual_wait << " seconds before collecting data.\n";
@@ -1379,7 +1378,7 @@ DataContainer perform_acoustic_measurement(AppArgs& args, const std::vector<floa
             Pa_Sleep(20);
         }
 
-        std::cout << "Begin measurement #" << (r + 1) << " of " << args.repetitions << "...\n";
+        std::cout << "Begin measurement #" << (r + 1) << " of " << args.num_reps << "...\n";
         ctx.current_rep = r;
         ctx.current_frame = 0;
         ctx.current_phase = MeasurementContext::MEASURING;

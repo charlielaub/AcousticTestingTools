@@ -62,10 +62,9 @@ struct AppArgs {
     float start_freq = 20.0f;
     float end_freq = 20000.0f;
     float ppo = 3.0f;              // Points (tones) per octave
-    int repetitions = 16;          // Number of successful blocks to average
+    int num_reps = 16;          // Number of successful blocks to average
     int warmup_blocks = 2;         // Blocks to play before recording starts
     float level = -10.0f;          // dB FS
-    
     int api_idx = -1;
     int input_device_idx = -1;
     int output_device_idx = -1;
@@ -83,7 +82,7 @@ struct AppArgs {
         std::cout << std::setw(name_width) << "start freq"        << " : " << start_freq << " Hz\n";
         std::cout << std::setw(name_width) << "end freq"          << " : " << end_freq << " Hz\n";
         std::cout << std::setw(name_width) << "points per octave" << " : " << ppo << "\n";
-        std::cout << std::setw(name_width) << "repetitions"       << " : " << repetitions << "\n";
+        std::cout << std::setw(name_width) << "num_reps"          << " : " << num_reps << "\n";
         std::cout << std::setw(name_width) << "warmup blocks"     << " : " << warmup_blocks << "\n";
         std::cout << std::setw(name_width) << "level"             << " : " << level << " dB\n";
         std::cout << "========================================\n\n";
@@ -101,12 +100,12 @@ void show_help_info(const char* prog_name) {
               << "  --start_freq, -s <float>            Start frequency in Hz (default: 20.0)\n"
               << "  --end_freq, -f <float>              End frequency in Hz (default: 20000.0)\n"
               << "  --ppo, -p <float>                   Tones per octave (default: 3.0)\n"
-              << "  --repetitions, -n <int>             Number of valid runs to average (default: 16)\n"
+              << "  --num_reps, -n <int>                Number of valid runs to average (default: 16)\n"
               << "  --warmup_blocks, -w <int>           Blocks to play before recording (default: 2)\n"
               << "  --api_idx, -a <int>                 PortAudio host API index\n"
               << "  --input_device_idx, -i <int>        PortAudio hardware input device index\n"
-              << "  --output_device_idx, -o <int>       PortAudio hardware output device index\n"
               << "  --input_channels, -I <id1> <id2>    Two physical input channel indices\n"
+              << "  --output_device_idx, -o <int>       PortAudio hardware output device index\n"
               << "  --output_channels, -O <id1> <id2>   Two physical output channel indices\n"
               << "  --help, -h                          Display this help message and exit\n\n";
 }
@@ -152,8 +151,8 @@ AppArgs parse_arguments(int argc, char* argv[]) {
             parseAndValidateFloat(arg, argv[++i], args.end_freq, true);
         } else if (arg == "--ppo" || arg == "-p") {
             parseAndValidateFloat(arg, argv[++i], args.ppo, true);
-        } else if (arg == "--repetitions" || arg == "-n") {
-            parseAndValidateInt(arg, argv[++i], args.repetitions, 1);
+        } else if (arg == "--num_reps" || arg == "-n") {
+            parseAndValidateInt(arg, argv[++i], args.num_reps, 1);
         } else if (arg == "--warmup_blocks" || arg == "-w") {
             parseAndValidateInt(arg, argv[++i], args.warmup_blocks, 0);
         } else if (arg == "--level" || arg == "-l") {
@@ -428,7 +427,7 @@ bool write_wav_file_plus_info(const AppArgs& args, const std::string& filename, 
     write_u("ffte", static_cast<uint32_t>(args.fft_exp));
     write_f("levl", args.level);
     write_u("date", static_cast<uint32_t>(std::time(nullptr)));
-    write_u("reps", static_cast<uint32_t>(args.repetitions));
+    write_u("reps", static_cast<uint32_t>(args.num_reps));
 
     file.close();
     return file.good();
@@ -459,7 +458,7 @@ int main(int argc, char* argv[]) {
     IMDContext ctx{
         stimulus, fft_size,
         pa_in_channels, pa_out_channels, args.in_channels[0], args.in_channels[1],
-        IMDContext::WARMUP, args.warmup_blocks, 0, args.repetitions, 0, 0,
+        IMDContext::WARMUP, args.warmup_blocks, 0, args.num_reps, 0, 0,
         std::vector<float>(fft_size, 0.0f),
         std::vector<float>(fft_size, 0.0f),
         std::vector<double>(fft_size, 0.0)
@@ -487,7 +486,7 @@ int main(int argc, char* argv[]) {
 
     while (ctx.current_phase != IMDContext::COMPLETE && Pa_IsStreamActive(stream) == 1) {
         if (ctx.successful_reps != last_reported_reps) {
-            std::cout << "\rAveraging Block: " << ctx.successful_reps << " / " << args.repetitions << std::flush;
+            std::cout << "\rAveraging Block: " << ctx.successful_reps << " / " << args.num_reps << std::flush;
             last_reported_reps = ctx.successful_reps;
         }
         int current_slips = ctx.slips_detected.load();
@@ -507,7 +506,7 @@ int main(int argc, char* argv[]) {
     // 4. Finalize TSA Average
     std::vector<float> final_mic(fft_size);
     for (int n = 0; n < fft_size; ++n) {
-        final_mic[n] = static_cast<float>(ctx.tsa_accumulator[n] / args.repetitions);
+        final_mic[n] = static_cast<float>(ctx.tsa_accumulator[n] / args.num_reps);
     }
 
     // 5. Save Files
