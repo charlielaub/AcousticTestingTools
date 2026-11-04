@@ -1457,8 +1457,12 @@ std::vector<float> compute_averaged_measurement(const DataContainer& alignment_d
 
 
 // Computes the time-domain impulse response using the true H1 estimator
-// across multiple pre-aligned, un-averaged measurement datasets.
-std::vector<float> compute_true_h1_time_domain(const DataContainer& alignment_data)
+// across multiple pre-aligned, un-averaged measurement datasets,
+// applying a zero-phase half-cosine fade to eliminate low-frequency noise.
+std::vector<float> compute_true_h1_time_domain(const DataContainer& alignment_data, 
+                                               float sample_rate, 
+                                               float f_start = 10.0f, 
+                                               float f_end = 20.0f)
 {
     // Total number of measurement repetitions/trials
     size_t num_trials = alignment_data.stimulus_data.size();
@@ -1509,22 +1513,35 @@ std::vector<float> compute_true_h1_time_domain(const DataContainer& alignment_da
             G_xx_sum[f] += std::real(REF_conj * REF_f[f]); 
             
             // Gxy = REF* * MIC (Cross-spectrum)
-            // Uncorrelated background noise phase vectors point in random directions 
-            // across trials and systematically cancel out inside this accumulator.
             G_xy_sum[f] += REF_conj * MIC_f[f];            
         }
     }
 
-    // 2. Compute the final frequency-domain H1 matrix division
-    // (Note: dividing both sums by num_trials cancels out mathematically, so we omit for performance)
+    // 2. Compute the final frequency-domain H1 matrix division with Apodization Taper
     std::vector<std::complex<float>> H1_f(num_freq_bins);
+    float df = sample_rate / static_cast<float>(signal_length); // Hz per bin
+    const float pi = 3.14159265358979323846f;
+
     for (size_t f = 0; f < num_freq_bins; ++f) {
+        float freq = f * df;
+        float taper = 1.0f; // Default unity gain
+
+        // Evaluate the half-cosine (Hann) fade
+        if (freq <= f_start) {
+            taper = 0.0f; // Completely mute unexcited low frequencies
+        } else if (freq < f_end) {
+            // Map the transition band to a phase angle from 0 to PI
+            float theta = pi * (freq - f_start) / (f_end - f_start);
+            // Raised cosine evaluation: transitions smoothly from 0.0 to 1.0
+            taper = 0.5f * (1.0f - std::cos(theta));
+        }
+
         float Gxx = G_xx_sum[f];
         std::complex<float> Gxy = G_xy_sum[f];
 
-        // Guard against division-by-zero noise amplification in unexcited frequencies
+        // Guard against division-by-zero, then apply the calculated scalar taper
         if (Gxx > 1e-15f) {
-            H1_f[f] = Gxy / Gxx;
+            H1_f[f] = (Gxy / Gxx) * taper;
         } else {
             H1_f[f] = std::complex<float>(0.0f, 0.0f);
         }
@@ -1629,8 +1646,9 @@ int main(int argc, char* argv[]) {
     //  args.level is written to all WAV data files
     args.level = calculate_last_75_rms( averaged_ref );
 
-    // Compute time domain impulse response using H1 estimator 
-    std::vector<float> h1_ir = compute_true_h1_time_domain(aligned_data);
+    // Compute time domain impulse response using H1 estimator
+    // Frequencies below start_freq are excluded 
+    std::vector<float> h1_ir = compute_true_h1_time_domain(aligned_data, args.sample_rate, args.start_freq, 2.0*args.start_freq);
 
     // Generate and store a timestamp
     args.timestamp = get_current_timestamp_32();

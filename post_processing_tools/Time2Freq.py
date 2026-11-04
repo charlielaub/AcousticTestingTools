@@ -80,12 +80,12 @@ def parse_arguments():
     parser.add_argument("-k","--spl_corrections", 
             type=parse_inline_config,
             default={},
-            help="String of the parameters used to set the SPL level: '-k V1=6.15, V2=2.45, Ag=20, Smic=0.01, d=0.25'"
+            help="String of the parameters used to set the SPL level: -k \"V1=6.15, V2=2.45, Ag=20.0, Smic=10.0, d=0.25\" "
     )
     parser.add_argument("--time_outfile", 
             type=str, 
             default=None,
-            help="File name for time domain response produce by the Farina deconvolution."
+            help="When supplied, the time domain response will be saved with this file name in the WAV format."
     )
     return parser.parse_args()
 
@@ -276,10 +276,16 @@ def run_farina_analysis(
         else:
             windowed_slice = np.array([0.0])
             
-        # PHASE FIX: Circularly shift the array so the impulse peak sits at index 0.
-        # This prevents wild phase wrapping and produces the true phase response.
-        peak_offset = harmonic_peak_idx - current_gate_start
-        windowed_slice_shifted = np.roll(windowed_slice, -peak_offset)
+        # -------------------------------------------------------------
+        # LATENCY FIX: Align the FFT to the true time=0 reference, not the peak.
+        # This preserves the physical time-of-flight as true phase rotation.
+        # -------------------------------------------------------------
+        harmonic_t0_idx = timezero_sample_idx - shift_samples
+        t0_offset = harmonic_t0_idx - current_gate_start
+        
+        # Roll the array so the true t=0 sits at index 0 of the FFT.
+        # (Tukey window ensures wrapped tails are cleanly tapered to 0.0)
+        windowed_slice_shifted = np.roll(windowed_slice, -t0_offset)
         
         # Compute FFT spectrum on the shifted slice
         fft_vals = np.fft.rfft(windowed_slice_shifted)
@@ -294,17 +300,35 @@ def run_farina_analysis(
         # Compute exact magnitude natively
         mag_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)
 
-        # Calculate raw phase (returns radians) and convert to degrees
-        phase = np.angle(fft_vals)
-        phase = np.degrees(phase)
+        # -------------------------------------------------------------
+        # PHASE CORRECTION 1: Unwrap phase BEFORE interpolation
+        # -------------------------------------------------------------
+        raw_phase_rad = np.angle(fft_vals)
+        phase_unwrapped_rad = np.unwrap(raw_phase_rad)
+        phase_deg = np.degrees(phase_unwrapped_rad)
         
+        # -------------------------------------------------------------
+        # PHASE CORRECTION 2: Min Phase requires full double-sided FFT
+        # -------------------------------------------------------------
         try:
-            log_mag = np.log(np.abs(fft_vals) + 1e-12)
-            # Hilbert transform imaginary part returns radians, convert to degrees
-            min_phase = -signal.hilbert(log_mag).imag
-            min_phase = np.degrees(min_phase)
+            # Recompute a full FFT specifically for the Hilbert transform
+            full_fft = np.fft.fft(windowed_slice_shifted)
+            log_mag_full = np.log(np.abs(full_fft) + 1e-12)
+            
+            # The imaginary part of the analytic signal of the full log-magnitude 
+            # yields the exact minimum phase relation.
+            analytic_sig = signal.hilbert(log_mag_full)
+            min_phase_full_rad = -analytic_sig.imag
+            
+            # Truncate back to the rfft length to match our standard frequency arrays
+            min_phase_rad = min_phase_full_rad[:len(fft_vals)]
+            
+            # Unwrap the minimum phase as well before it hits the interpolator
+            min_phase_unwrapped_rad = np.unwrap(min_phase_rad)
+            min_phase_deg = np.degrees(min_phase_unwrapped_rad)
+            
         except Exception:
-            min_phase = np.zeros_like(phase)
+            min_phase_deg = np.zeros_like(phase_deg)
             
         # Format output according to frequency grid preference
         if Fgrid_density > 0:
@@ -312,8 +336,10 @@ def run_farina_analysis(
             if np.sum(valid_mask) > 1:
                 f_interp = fft_freqs[valid_mask]
                 m_interp = mag_db[valid_mask]
-                p_interp = phase[valid_mask]
-                mp_interp = min_phase[valid_mask]
+                
+                # Now passing the UNWRAPPED degrees into the interpolator
+                p_interp = phase_deg[valid_mask]          
+                mp_interp = min_phase_deg[valid_mask]     
                 
                 res_freqs = log_freqs
                 res_mag = np.interp(res_freqs, f_interp, m_interp, left=m_interp[0], right=m_interp[-1])
@@ -336,8 +362,8 @@ def run_farina_analysis(
             harmonic_results[k] = {
                 'freqs': fft_freqs,
                 'mag_db': mag_db,
-                'phase': phase,
-                'min_phase': min_phase,
+                'phase': phase_deg,
+                'min_phase': min_phase_deg,
                 'delta_frequency': delta_f
             }
             
@@ -760,7 +786,7 @@ def write_frd_file(filename, freqs, mag_db, phase_deg):
 
 
 
-# Save data FLOAT32 WAV
+# Save data in FLOAT32 format to a WAV file
 def save_wav(filename, sample_rate, data):
     float_data = np.float32(data)
     scipy.io.wavfile.write(filename, sample_rate, float_data)
@@ -843,7 +869,7 @@ def main():
         print(f"               End Frequency (f1sw): {measurement_metadata.get("f1sw", 0.0)} Hz")
         print(f"                  Chirp Rate (rchr): {measurement_metadata.get("rchr", 0.0)} seconds/decade Hz")
         print(f"                 Repetitions (reps): {measurement_metadata.get("reps", 1)}")
-        print(f"              Internal Level (levl): {measurement_metadata.get("levl", -10.0)} dB")
+        print(f"              Internal Level (levl): {measurement_metadata.get("levl", 0.0)}")
         print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"--------------------------------------------------------------------------------\n\n")
         print("Exiting Program.")
@@ -859,18 +885,47 @@ def main():
         print(f"               End Frequency (f1sw): {measurement_metadata.get("f1sw", 0.0)} Hz")
         print(f"                  Chirp Rate (rchr): {measurement_metadata.get("rchr", 0.0)} seconds/decade Hz")
         print(f"                 Repetitions (reps): {measurement_metadata.get("reps", 1)}")
-        print(f"              Internal Level (levl): {measurement_metadata.get("levl", -10.0)} dB")
+        print(f"              Internal Level (levl): {measurement_metadata.get("levl", 0.0)}")
         print(f"             HF Window Start (fhfw): {measurement_metadata.get("fhfw", 0.0)} Hz")
         print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
         print(f"--------------------------------------------------------------------------------\n")
 
 
+    # State variables
+    state = {
+        'gate_idx': initial_gate_idx,            
+        'gate_start_idx': initial_start_idx,
+        'user_has_set_gate': False,    
+        'selecting_gate_step': 0,               
+        'temp_start_time_ms': 0.0,              
+        'selecting_gate': False,
+        'raw_harmonic_results': None,
+        'smoothed_harmonic_results': None,
+        'selected_harmonic': 'H1',
+        'hd_max': 5,
+        'freq_line_plot': None,
+        'showing_phase': False,
+        'using_min_phase': False,
+        'tukey_alpha': 0.1,
+        'resolution': None,
+        'smoothing_octaves': 24,
+        'last_smoothing_octaves': 24,
+        'HF_window_startF': HF_window_startF,
+        'SPL_factor': None,
+        'saved_limits': {
+            'FREQ': None,
+            'THD': None
+        },
+        'y_cid': None
+    }
+    
     # 1. Compute the full impulse response using Farina deconvolution
     print("Computing the time domain impulse response using the Farina method...")
     full_ir = scipy.signal.fftconvolve(mic_data, inv_filter, mode='full')
     
     #if time_outfile was provided, save the time domain response
     if args.time_outfile is not None:
+        print(f"Saving the time domain impulse response to the file {args.time_outfile}.")
         save_wav(args.time_outfile, sample_rate, full_ir)
     
     print("Using the imported impulse response to correct the Farina time axis...")
@@ -907,6 +962,7 @@ def main():
         SPL_factor /= ( RMS_internal_level * v_in1_max * amp_gain )
         SPL_factor *= 50000.0
         print(f"The SPL conversion factor is {SPL_factor:.3e}\n")
+        state['SPL_factor'] = SPL_factor
     else:
         mag_ylabel = "Relative SPL [dB"
     mag_ylabel += "]"
@@ -944,32 +1000,6 @@ def main():
     start_line = ax_time.axvline(x=initial_start_time_ms, color='orange', linestyle='--', lw=1.5, label='Window Start')
     gate_line  = ax_time.axvline(x=initial_gate_time_ms,  color='g',     linestyle='--', lw=1.5, label='Window End')
     t0_line  = ax_time.axvline(x=0.0,  color='black',     linestyle='--', lw=1.5, label='time=0')
-    
-    # State variables
-    state = {
-        'gate_idx': initial_gate_idx,            
-        'gate_start_idx': initial_start_idx,
-        'user_has_set_gate': False,    
-        'selecting_gate_step': 0,               
-        'temp_start_time_ms': 0.0,              
-        'selecting_gate': False,
-        'raw_harmonic_results': None,
-        'smoothed_harmonic_results': None,
-        'selected_harmonic': 'H1',
-        'hd_max': 5,
-        'freq_line_plot': None,
-        'showing_phase': False,
-        'using_min_phase': False,
-        'tukey_alpha': 0.1,
-        'resolution': None,
-        'smoothing_octaves': 24,
-        'last_smoothing_octaves': 24,
-        'HF_window_startF': HF_window_startF,
-        'saved_limits': {        # <-- NEW: Explicitly store saved limits for FREQ and THD only
-            'FREQ': None,
-            'THD': None
-        }
-    }
     
     initial_win = scipy.signal.get_window(('tukey', state['tukey_alpha']), initial_gate_idx)
     ylim_initial = ax_time.get_ylim()
@@ -1009,6 +1039,61 @@ def main():
     
     # Optional: Clean minor ticks handled automatically
     ax_freq.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs='auto', numticks=10))
+    
+
+        
+
+
+
+    def update_freq_y_grid(changed_ax):
+        # Temporarily disconnect to prevent an infinite recursion loop
+        if 'y_cid' in state and state['y_cid'] is not None:
+            changed_ax.callbacks.disconnect(state['y_cid'])
+            
+        y_min, y_max = changed_ax.get_ylim()
+        y_span = y_max - y_min
+
+        # 1. PHASE VIEW: Hard lock limits to exactly -180.0 / 180.0 and 60/30 ticks
+        if state['showing_phase']:
+            changed_ax.set_ylim(-180.0, 180.0)  # <-- NEW: Absolutely prevents zoom/padding
+            changed_ax.yaxis.set_major_locator(ticker.MultipleLocator(60))
+            changed_ax.yaxis.set_minor_locator(ticker.MultipleLocator(30))
+            
+        # 2. THD VIEW: Use automatic linear decimal scaling
+        elif state['selected_harmonic'] == 'THD':
+            changed_ax.yaxis.set_major_locator(ticker.AutoLocator())
+            changed_ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+            
+        # 3. MAGNITUDE VIEW (dB): Use custom acoustic intervals
+        else:
+            if y_span > 49:
+                major_step, minor_step = 10.0, 5.0
+            elif y_span > 21:
+                major_step, minor_step = 5.0, 1.0
+            elif y_span > 9:
+                major_step, minor_step = 3.0, 1.0
+            else:
+                major_step, minor_step = 1.0, 0.5
+                
+            changed_ax.yaxis.set_major_locator(ticker.MultipleLocator(major_step))
+            changed_ax.yaxis.set_minor_locator(ticker.MultipleLocator(minor_step))
+            
+        # Reconnect the event listener callback
+        state['y_cid'] = changed_ax.callbacks.connect('ylim_changed', update_freq_y_grid)
+
+
+
+
+        if y_span > 45:
+            major_step, minor_step = 10.0, 5.0
+        elif y_span > 21:
+            major_step, minor_step = 6.0, 3.0
+        elif y_span > 9:
+            major_step, minor_step = 3.0, 1.0
+        else:
+            # THIS IS REQUIRED! Catch zooms tighter than 12 dB
+            major_step, minor_step = 1.0, 0.5
+
 
     # Button Axes
     btn_y = 0.03
@@ -1055,10 +1140,6 @@ def main():
     textbox_dataset.set_active(False)
     btn_next = Button(ax_btn_next, r'$\blacktriangleright$', color='aliceblue', hovercolor='palegreen')
 
-
-
-
-
     # Create the button axes initially using ax_freq's bounding box
     pos = ax_freq.get_position()
     btn_w, btn_h = 0.025, 0.025  # Button width and height as fraction of figure
@@ -1093,10 +1174,6 @@ def main():
             
     # Ensure this is called strictly ONCE during initialization
     btn_plus.on_clicked(handle_plus_button)
-
-
-
-
 
     def get_harmonic_list():
         h_list = [f"H{i}" for i in range(1, state['hd_max'] + 1)]
@@ -1186,7 +1263,7 @@ def main():
             if val == current_last:
                 return
                 
-            if 0 <= val <= 48:
+            if 1 <= val <= 48:
                 user_message = "A new smoothing level was provided.\nPress Compute/Clear to clear the data and then again to show the new "
                 state['smoothing_octaves'] = val
                 
@@ -1201,7 +1278,7 @@ def main():
                 
                 state['last_smoothing_octaves'] = val 
             else:
-                user_message = "You entered an invalid value. Valid octave smoothing values run from 0 (raw FFT bins) to 48 points per octave."
+                user_message = "You entered an invalid value. Valid octave smoothing values run from 1 to 48 points per octave."
                 print(user_message)
                 show_notification("Error", user_message)
                 current_val = state['smoothing_octaves']
@@ -1289,7 +1366,8 @@ def main():
             ax_btn_gate.set_facecolor('aliceblue')
             print("Gate selection cancelled.")
         fig.canvas.draw_idle()
-        
+
+
     def refresh_frequency_plot():
         if state['smoothed_harmonic_results'] is None:
             return
@@ -1299,9 +1377,11 @@ def main():
 
         results = state['smoothed_harmonic_results']
         sel = current_sel
-
+        
         # Determine k_idx early so we can check button visibility eligibility
         k_idx = int(sel[1:]) if len(sel) > 1 and sel[1:].isdigit() else 1
+        if sel == "ALL" or sel == "THD":   #k_idx is not valid when viewing ALL or THD
+            k_idx=-1
 
         # Manage '+' button visibility: Only show for FREQ (H1 magnitude) or THD views
         if 'ax_btn_plus' in locals() or 'ax_btn_plus' in globals():
@@ -1437,11 +1517,31 @@ def main():
                     mag_data_for_scaling = mag_data
 
             # Check if user explicitly saved limits via the '+' button for FREQ or THD
-            active_limit_key = 'THD' if sel == 'THD' else ('FREQ' if k_idx == 1 else None)
+            active_limit_key = None
+            if not current_phase:
+                if sel == 'THD':
+                    active_limit_key = 'THD'
+                elif k_idx == 1:
+                    active_limit_key = 'FREQ' 
             saved_lims = state['saved_limits'].get(active_limit_key) if active_limit_key else None
 
-            if saved_lims is not None:
-                # Apply user's explicitly saved limits
+            # --- APPLY SCALING ---
+            if current_phase:
+                # Force strictly fixed Phase scaling (no user customization)
+                ax_freq.set_ylim(-180, 180)
+                ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(60))
+                ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(30))
+                ax_freq.grid(True, which='major', linestyle='-', linewidth=0.75)
+                ax_freq.grid(True, which='minor', linestyle=':', linewidth=0.5)
+                
+                # Apply default X limits based on frequency
+                if active_ticks:
+                    ax_freq.set_xlim(float(active_ticks[0]), float(active_ticks[-1]))
+                else:
+                    ax_freq.set_xlim(20.0, 20000.0)
+
+            elif saved_lims is not None:
+                # Apply user's explicitly saved limits (for FREQ and THD)
                 ax_freq.set_xlim(saved_lims[0])
                 ax_freq.set_ylim(saved_lims[1])
             else:
@@ -1464,13 +1564,14 @@ def main():
                     y_min = y_max - 50.0
                     
                     ax_freq.set_ylim(y_min, y_max)
-                    ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(10))
-                    ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(5))
                     ax_freq.grid(True, which='major', linestyle='-', linewidth=0.75)
                     ax_freq.grid(True, which='minor', linestyle=':', linewidth=0.5)
 
             ax_freq.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
 
+        # Force a grid calculation based on the new limits AND reconnect the listener wiped by .clear()
+        update_freq_y_grid(ax_freq)
+        
         fig.canvas.draw_idle()
 
     def handle_calc_button(event):
@@ -1540,8 +1641,8 @@ def main():
             
             # Apply SPL corrections: ==============================================
             # Convert the SPL correction factor into a decibel offset
-            if SPL_factor is not None and SPL_factor > 0:
-                spl_offset_db = 20 * np.log10(SPL_factor)
+            if state['SPL_factor'] is not None and state['SPL_factor'] > 0:
+                spl_offset_db = 20 * np.log10(state['SPL_factor'])
             else:
                 spl_offset_db = 0.0
 
@@ -1773,63 +1874,84 @@ def main():
         file_prefix = os.path.basename(clean_base_name)
         
         freq_path = os.path.join(save_dir, f"{file_prefix}_FREQ.png") if save_dir else f"{file_prefix}_FREQ.png"
+        
+        #define width and height for plots
+        PNG_width = 7.0
+        PNG_height = 0.5 * PNG_width
 
         # Plot A: Fundamental Magnitude (_FREQ.png)
-        fig_freq, ax_f = plt.subplots(figsize=(11, 5))
+        fig_freq, ax_f = plt.subplots(figsize=(PNG_width, PNG_height))
         ax_f.plot(res[1]['freqs'], res[1]['mag_db'], color='r', lw=1.2)
         ax_f.set_title("Fundamental Frequency Response - Magnitude")
         ax_f.set_xlabel("Frequency (Hz)")
         ax_f.set_ylabel(mag_ylabel)
         apply_custom_scaling_and_ticks(ax_f)
         
-        # 1. Determine upper and lower bounds based on your formatting rules
-        data_max = np.nanmax(res[1]['mag_db'])  # Ignores NaN masked values safely
-        
+        # 1. Determine baseline bounds
+        data_max = np.nanmax(res[1]['mag_db'])
         if np.isnan(data_max):
-            data_max = 0.0  # Fallback just in case all points are NaN
-            
-        # Snap y_max up to the nearest multiple of 5
+            data_max = 0.0
         y_max = np.ceil(data_max / 5.0) * 5.0
-        
-        # Maintain a total y-range of 50
         y_min = y_max - 50.0          
         
-        # 2. Apply the limits to the frequency axis
+        # 2. Apply Limits FIRST (Saved limits overwrite baseline if they exist)
         ax_f.set_ylim(y_min, y_max)
-
-        # 3. Configure major (10) and minor (5) divisions
-        ax_f.yaxis.set_major_locator(ticker.MultipleLocator(10))
-        ax_f.yaxis.set_minor_locator(ticker.MultipleLocator(5))
-
-        # 4. Turn on the grid lines to visualize the divisions
-        ax_f.grid(True, which='major', linestyle='-', linewidth=0.75)
-        ax_f.grid(True, which='minor', linestyle=':', linewidth=0.5)
-        
         if state['saved_limits']['FREQ'] is not None:
             ax_f.set_xlim(state['saved_limits']['FREQ'][0])
             ax_f.set_ylim(state['saved_limits']['FREQ'][1])
+
+        # 3. Calculate dynamic dB grid based on final Y-span
+        y_span_f = ax_f.get_ylim()[1] - ax_f.get_ylim()[0]
+        if y_span_f > 45:
+            maj_s, min_s = 10.0, 5.0
+        elif y_span_f > 21:
+            maj_s, min_s = 5.0, 1.0
+        elif y_span_f > 9:
+            maj_s, min_s = 3.0, 1.0
+        else:
+            maj_s, min_s = 1.0, 0.5
+
+        ax_f.yaxis.set_major_locator(ticker.MultipleLocator(maj_s))
+        ax_f.yaxis.set_minor_locator(ticker.MultipleLocator(min_s))
+        
+        # 4. Turn on the grid lines
+        ax_f.grid(True, which='major', linestyle='-', linewidth=0.75)
+        ax_f.grid(True, which='minor', linestyle=':', linewidth=0.5)
         
         fig_freq.savefig(freq_path, dpi=600, bbox_inches='tight')
         plt.close(fig_freq)
 
         # Plot B: Fundamental Phase (_PHASE.png)
-        fig_phase, ax_p = plt.subplots(figsize=(11, 5))
+        fig_phase, ax_p = plt.subplots(figsize=(PNG_width, PNG_height))
         phase_raw = res[1]['min_phase'] if state['using_min_phase'] else res[1]['phase']
         phase_to_plot = np.rad2deg(np.angle(np.exp(1j * np.deg2rad(phase_raw))))
         phase_title = "Fundamental Minimum Phase (Wrapped)" if state['using_min_phase'] else "Fundamental Phase (Wrapped)"
+        
         ax_p.plot(res[1]['freqs'], phase_to_plot, color='g', lw=1.2)
         ax_p.set_title(phase_title)
         ax_p.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
         ax_p.set_ylabel("Phase (degrees)")
-        ax_p.set_ylim(-180, 180)
-        ax_p.set_yticks([-180, -90, 0, 90, 180])
+        
+        # 1. Setup standard X-axis log formatting FIRST
         apply_custom_scaling_and_ticks(ax_p)
+        
+        # 2. Explicitly enforce absolute Phase Y-limits LAST to prevent overriding
+        ax_p.set_ylim(-180.0, 180.0)
+        
+        # 3. Apply the 60/30 exact grid
+        ax_p.yaxis.set_major_locator(ticker.MultipleLocator(60.0))
+        ax_p.yaxis.set_minor_locator(ticker.MultipleLocator(30.0))
+        
+        # Turn on the grid lines
+        ax_p.grid(True, which='major', linestyle='-', linewidth=0.75)
+        ax_p.grid(True, which='minor', linestyle=':', linewidth=0.5)
+        
         fig_phase.savefig(f"{base_name}_PHASE.png", dpi=600, bbox_inches='tight')
         plt.close(fig_phase)
 
         # Plot C: All Harmonics Magnitude (_HD.png)
-        fig_hd, ax_h = plt.subplots(figsize=(11, 5))
-        ax_h.plot(freqs, res[1]['mag_db'], color='r', lw=1.2, label='H1 (Fund)')
+        fig_hd, ax_h = plt.subplots(figsize=(PNG_width, PNG_height))
+        ax_h.plot(freqs, res[1]['mag_db'], color='r', lw=1.2, label='H1 ')
         colors = ['blue', 'tomato', 'green', 'black', 'aqua', 'blueviolet', 'peru', 'deeppink']
         for idx, k in enumerate(range(2, state['hd_max'] + 1)):
             if k in res:
@@ -1838,20 +1960,35 @@ def main():
         ax_h.set_title("Harmonic Distortion - All Harmonics")
         ax_h.set_xlabel(f'Frequency (Hz) at {state["resolution"]:.3g} Hz resolution')
         ax_h.set_ylabel(mag_ylabel)
-        apply_custom_scaling_and_ticks(ax_h)
+        # Apply x-axis custom tics and labels
+        apply_custom_scaling_and_ticks(ax_h) 
+        # Apply y-axis ticks:
+        ax_h.yaxis.set_major_locator(ticker.MultipleLocator(10.0))
+        ax_h.yaxis.set_minor_locator(ticker.MultipleLocator(5.0))        
         fig_hd.savefig(f"{base_name}_HD.png", dpi=600, bbox_inches='tight')
         plt.close(fig_hd)
 
         # Plot D: Total Harmonic Distortion (_THD.png)
-        fig_thd, ax_t = plt.subplots(figsize=(11, 5))
+        fig_thd, ax_t = plt.subplots(figsize=(PNG_width, PNG_height))
         ax_t.plot(res[1]['freqs'], res['thd_percent'], color='blue', lw=1.2)
         ax_t.set_title("Total Harmonic Distortion (THD)")
         ax_t.set_xlabel("Frequency (Hz)")
         ax_t.set_ylabel("THD (%)")
         apply_custom_scaling_and_ticks(ax_t)
+        
+        # Apply limits FIRST
         if state['saved_limits']['THD'] is not None:
             ax_t.set_xlim(state['saved_limits']['THD'][0])
             ax_t.set_ylim(state['saved_limits']['THD'][1])
+            
+        # Apply smart decimal AutoLocator for THD
+        ax_t.yaxis.set_major_locator(ticker.AutoLocator())
+        ax_t.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+        
+        # Turn on grid lines
+        ax_t.grid(True, which='major', linestyle='-', linewidth=0.75)
+        ax_t.grid(True, which='minor', linestyle=':', linewidth=0.5)
+        
         fig_thd.savefig(f"{base_name}_THD.png", dpi=600, bbox_inches='tight')
         plt.close(fig_thd)
 

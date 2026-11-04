@@ -67,3 +67,22 @@ else()
     target_include_directories(ProbeAudioDevs PRIVATE ${PORTAUDIO_INCLUDE_DIRS})
     target_link_libraries(ProbeAudioDevs PRIVATE ${PORTAUDIO_LIBRARIES})
 endif()
+
+# -------------------------------------------------------------
+# Program 3: DaDooImdImd
+# -------------------------------------------------------------
+add_executable(DaDooImdImd measurement_tools/DaDooImdImd.cpp)
+
+if(WIN32)
+    if(TARGET portaudio::portaudio)
+        target_link_libraries(DaDooImdImd PRIVATE portaudio::portaudio)
+    elseif(TARGET portaudio)
+        target_link_libraries(DaDooImdImd PRIVATE portaudio)
+    elseif(TARGET portaudio_static)
+        target_link_libraries(DaDooImdImd PRIVATE portaudio_static)
+    endif()
+    target_compile_definitions(DaDooImdImd PRIVATE PA_USE_ASIO=1)
+else()
+    target_include_directories(DaDooImdImd PRIVATE ${PORTAUDIO_INCLUDE_DIRS})
+    target_link_libraries(DaDooImdImd PRIVATE ${PORTAUDIO_LIBRARIES})
+endif()
