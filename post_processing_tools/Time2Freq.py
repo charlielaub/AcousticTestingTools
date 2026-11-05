@@ -11,8 +11,6 @@ Date: October 2026
 """
 
 
-    
-import argparse
 import os
 import sys
 import numpy as np
@@ -29,6 +27,7 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox
 from scipy.interpolate import Akima1DInterpolator
+import argparse, textwrap
 
 
 
@@ -58,9 +57,11 @@ def parse_inline_config(arg_str):
 def parse_arguments():
     """
     Parses command-line arguments for input WAV file, base filename for outputs,
-    optional microphone calibration, sensitivity parameters, and amplifier gain.
+    microphone calibration and sensitivity, interface input and amplifier gain.
     """
-    parser = argparse.ArgumentParser(description="An interactive program to process loudspeaker measurements collected using the program DaDooRunRun. Exports frequency domain response data and plots.")
+    parser = argparse.ArgumentParser(
+            description="""About Time2Freq: An interactive program to process loudspeaker measurements collected using the program DaDooRunRun. Exports frequency domain response data and plots.""",
+            formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("-b","--basename_infiles",
             type=str,
             required=True,
@@ -80,7 +81,17 @@ def parse_arguments():
     parser.add_argument("-k","--spl_corrections", 
             type=parse_inline_config,
             default={},
-            help="String of the parameters used to set the SPL level: -k \"V1=6.15, V2=2.45, Ag=20.0, Smic=10.0, d=0.25\" "
+            help=textwrap.dedent("""\
+        Comma-delimited quoted string of the five parameters used to set the SPL level.
+            
+        Example: -k "V1=6.15, V2=2.45, Ag=20.0, Smic=10.0, d=0.25"
+            
+        V1   : Channel 1 (loopback) input sensitivity, Volts to reach 0dBFS (+/-1.0) on the audio interface
+        V2   : Channel 2 (microphone) input sensitivity, Volts to reach 0dBFS (+/-1.0) on the audio interface
+        Ag   : Amplifier voltage gain, Volts at speaker terminals per Volt applied to the input
+        Smic : Microphone sensitivity in mV/Pa
+        d    : The distance in meters between the loudspeaker and microphone during the measurement.
+            """).strip()
     )
     parser.add_argument("--time_outfile", 
             type=str, 
@@ -830,8 +841,8 @@ def main():
     mic_sens  = args.spl_corrections.get('Smic', 0.0)
     distance  = args.spl_corrections.get('d', 0.0)
     
-    print(f"\nSPL correction parameters V1: {v_in1_max}, V2: {v_in2_max}, Amp Gain: {amp_gain}, Mic sensitivity: {mic_sens}, and Distance: {distance}\n")
-    print(f"The mic cal file is {args.mic_cal_file}")
+    #print(f"\nSPL correction parameters V1: {v_in1_max}, V2: {v_in2_max}, Amp Gain: {amp_gain}, Mic sensitivity: {mic_sens}, and Distance: {distance}\n")
+    #print(f"The mic cal file is {args.mic_cal_file}")
     
     # form filenames for input files, using infile basename
     measurement_filename = args.basename_infiles + "_m.wav"

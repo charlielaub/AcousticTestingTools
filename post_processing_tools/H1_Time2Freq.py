@@ -1,5 +1,5 @@
 """
-Time2Freq - Convert the Time Domain Response to the Frequency Domain Response 
+H1_Time2Freq - Convert the Time Domain Response to the Frequency Domain Response 
 Description: Calculates the time domain frequency response from a windowed 
     impulse response, plus correction factors. Can produce relative SPL levels 
     or in units of dB re 20 uPa @ 2.83V/1m. Both the regular phase and minimum 
@@ -9,14 +9,42 @@ Author: Charlie Laub
 Date: October 2026
 """
 
-import argparse
 import sys
 import numpy as np
 import scipy.io.wavfile as wav
 import scipy.signal
+from scipy.interpolate import Akima1DInterpolator
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox
 from matplotlib.ticker import LogLocator
+import argparse, textwrap
+import struct
+from datetime import datetime
+
+
+
+def parse_inline_config(arg_str):
+    """
+    Parses a string like 'V1=6.15, V2=2.45, Vg=20, Smic=0.01, d=0.25' 
+    into a dictionary of floats.
+    """
+    config = {}
+    if not arg_str:
+        return config
+        
+    for pair in arg_str.split(','):
+        if '=' not in pair:
+            raise argparse.ArgumentTypeError(f"Invalid parameter format: '{pair}'. Use key=value.")
+        key, val = pair.split('=', 1)
+        key = key.strip()
+        try:
+            config[key] = float(val.strip())
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Value for '{key}' must be a number, got '{val}'")
+            
+    return config
+
+
 
 def parse_arguments():
     """
@@ -33,39 +61,108 @@ def parse_arguments():
             default="FR.frd",
             help="Path to save the output in FRD format (default: FR.frd)."
     )
-    parser.add_argument("--mic_cal", 
+    parser.add_argument("-s","--smoothing", 
+            type=int, 
+            default=24,
+            help="Response Smoothing in Points per Octave, valid entries are 1..48 (default: 24)."
+    )
+    parser.add_argument("-c","--mic_cal_file", 
             type=str, 
             default=None,
             help="Path to microphone calibration file (*.mic or *.cal)."
     )
-    parser.add_argument("--mic_sensitivity", 
-            type=float, 
-            default=None,
-            help="Microphone sensitivity in milliVolts per Pascal (mV/Pa)."
-    )
-    parser.add_argument("--v_stimulus", 
-            type=float, 
-            default=2.83,
-            help="RMS Voltage reported in SPL units (default: 2.83V)."
-    )
-    parser.add_argument("--distance", 
-            type=float, 
-            default=None,
-            help="Distance between mic and source in meters."
+    # Compact inline configuration string
+    parser.add_argument("-k","--spl_corrections", 
+            type=parse_inline_config,
+            default={},
+            help=textwrap.dedent("""\
+        Comma-delimited quoted string of the five parameters used to set the SPL level.
+            
+        Example: -k "V1=6.15, V2=2.45, Ag=20.0, Smic=10.0, d=0.25"
+            
+        V1   : Channel 1 (loopback) input sensitivity, Volts to reach 0dBFS (+/-1.0) on the audio interface
+        V2   : Channel 2 (microphone) input sensitivity, Volts to reach 0dBFS (+/-1.0) on the audio interface
+        Ag   : Amplifier voltage gain, Volts at speaker terminals per Volt applied to the input
+        Smic : Microphone sensitivity in mV/Pa
+        d    : The distance in meters between the loudspeaker and microphone during the measurement.
+            """).strip()
     )
     return parser.parse_args()
 
-def read_wav_file(filename):
+
+
+def read_wav_file_plus_info(filename):
     """
-    Reads a mono WAV file and returns the sample rate and raw audio data.
+    Reads a 32-bit float mono WAV file and extracts the audio data (as a NumPy array),
+    the sample rate, and custom xDAT metadata into a dictionary.
+    Optimized with NumPy frombuffer for high speed and low memory usage.
     """
-    sample_rate, data = wav.read(filename)
-    
-    # Handle stereo files by taking the first channel if necessary
-    if data.ndim > 1:
-        data = data[:, 0]
-        
-    return sample_rate, data
+    with open(filename, "rb") as f:
+        # 1. Verify RIFF header
+        riff = f.read(4)
+        if riff != b"RIFF":
+            raise ValueError("Not a valid RIFF WAV file.")
+
+        file_size = struct.unpack("<I", f.read(4))[0]
+        wave = f.read(4)
+        if wave != b"WAVE":
+            raise ValueError("Not a valid WAVE file.")
+
+        sample_rate = None
+        audio_data = np.array([], dtype=np.float32)
+        custom_metadata = {}
+
+        # 2. Traverse file chunks iteratively
+        while True:
+            chunk_id = f.read(4)
+            if not chunk_id or len(chunk_id) < 4:
+                break
+
+            chunk_size_bytes = f.read(4)
+            if not chunk_size_bytes or len(chunk_size_bytes) < 4:
+                break
+            chunk_size = struct.unpack("<I", chunk_size_bytes)[0]
+
+            if chunk_id == b"fmt ":
+                fmt_data = f.read(chunk_size)
+                audio_format, num_channels, sample_rate = struct.unpack(
+                    "<HHI", fmt_data[:8]
+                )
+                if audio_format != 3:  # 3 indicates IEEE float format
+                    raise ValueError(
+                        "WAV file is not in 32-bit IEEE float format (format tag 3)."
+                    )
+
+            elif chunk_id == b"data":
+                data_bytes = f.read(chunk_size)
+                # Zero-copy memory mapping via NumPy frombuffer
+                audio_data = np.frombuffer(data_bytes, dtype=np.float32).copy()
+
+            elif chunk_id == b"xDAT":
+                xdat_data = f.read(chunk_size)
+                offset = 0
+                while offset < chunk_size:
+                    tag = xdat_data[offset : offset + 4].decode("utf-8", errors="ignore")
+                    offset += 4
+
+                    if tag in ("date", "reps"):
+                        val = struct.unpack("<I", xdat_data[offset : offset + 4])[0]
+                    else:
+                        val = struct.unpack("<f", xdat_data[offset : offset + 4])[0]
+                    offset += 4
+
+                    custom_metadata[tag] = val
+            else:
+                # Skip unknown chunks
+                f.seek(chunk_size, 1)
+
+            # Handle RIFF word-alignment padding
+            if chunk_size % 2 != 0:
+                f.seek(1, 1)
+
+    return sample_rate, audio_data, custom_metadata
+
+
 
 def read_mic_cal_file(filename, freqs):
     """
@@ -101,25 +198,42 @@ def read_mic_cal_file(filename, freqs):
         print(f"Error reading microphone calibration file: {e}")
         return np.zeros_like(freqs)
 
+
+
 def write_frd_file(filename, freqs, mag_db, phase_deg):
     """
     Saves frequency domain data to an FRD format text file.
-    Standard FRD format: Frequency (Hz), Magnitude (dB), Phase (degrees)
+    - Frequency: Fixed float with 1 decimal place (Hz)
+    - Magnitude: 2 decimal places (dB)
+    - Phase: 1 decimal place (degrees)
+    - Automatically skips any NaN or infinite values.
     """
     try:
+        # Ensure inputs are numpy arrays for safe masking
+        freqs = np.asarray(freqs)
+        mag_db = np.asarray(mag_db)
+        phase_deg = np.asarray(phase_deg)
+        
+        # Create a mask that keeps only valid, finite numbers across all arrays
+        valid_mask = np.isfinite(freqs) & np.isfinite(mag_db) & np.isfinite(phase_deg)
+        
         with open(filename, 'w') as f:
             f.write("* Frequency Response Data (FRD)\n")
             f.write("* Columns: Frequency (Hz), Magnitude (dB), Phase (deg)\n")
-            for freq, mag, phase in zip(freqs, mag_db, phase_deg):
-                f.write(f"{freq:.4f}\t{mag:.4f}\t{phase:.4f}\n")
-        print(f"Successfully saved FRD data to {filename}")
+            
+            # Iterate only over the filtered, valid data points
+            for freq, mag, phase in zip(freqs[valid_mask], mag_db[valid_mask], phase_deg[valid_mask]):
+                freq_str = f"{freq:.1f}"
+                mag_str = f"{mag:.2f}"
+                phase_str = f"{phase:.1f}"
+                
+                f.write(f"{freq_str}\t{mag_str}\t{phase_str}\n")
+                
+        print(f"   ...saved {filename}")
     except Exception as e:
-        print(f"Error saving FRD file: {e}")
+        print(f"WARNING: The following error was encountered when attempting to save file {filename}: {e}")
 
 
-
-import numpy as np
-import scipy.signal
 
 
 def compute_frequency_response(
@@ -127,15 +241,14 @@ def compute_frequency_response(
     sample_rate,
     gate_end_idx,
     tukey_alpha,
-    mic_cal_file,
-    mic_sensitivity,
-    v_stimulus,
-    distance,
+    start_freq,
+    end_freq,
+    Fgrid_density
 ):
     """Applies a Tukey window, computes standard FFT and minimum phase FFT,
-
-    applies correction factors and returns frequencies, magnitude (dB),
-    standard phase (deg), minimum phase (deg), and delta_frequency (Hz).
+    and interpolates the response to Fgrid_density points per octave.
+    Returns frequencies, magnitude (dB), standard phase (deg), minimum phase (deg), 
+    and delta_frequency (Hz).
     """
     gate_end_idx = max(10, min(gate_end_idx, len(audio_data)))
 
@@ -150,30 +263,16 @@ def compute_frequency_response(
 
     # Standard FFT response
     fft_result = np.fft.rfft(windowed_data, n=n_fft)
-    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
-
+    
+    # 1. Get raw magnitude (No division by sample_rate or window sum needed!)
     mag = np.abs(fft_result)
-    mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))  # Prevent log(0)
-    phase_deg = np.angle(fft_result, deg=True)
-
-    # Apply Microphone Sensitivity Scaling
-    if mic_sensitivity is not None and mic_sensitivity > 0:
-        sensitivity_v_pa = mic_sensitivity / 1000.0  # mV/Pa to V/Pa
-        p_ref = 20e-6  # 20 uPa reference pressure
-        spl_offset = -20.0 * np.log10(sensitivity_v_pa * p_ref)
-        mag_db += spl_offset
-
-    # Apply Microphone Calibration File Compensation
-    if mic_cal_file is not None:
-        cal_corrections = read_mic_cal_file(mic_cal_file, freqs)
-        mag_db -= cal_corrections
-
-    # Scale for stimulus RMS voltage
-    mag_db -= 20.0 * np.log10(v_stimulus)
-
-    # Scale for measurement distance
-    if distance is not None:
-        mag_db += 20.0 * np.log10(distance)
+    
+    # 2. Calculate dB
+    mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))
+    
+    # UNWRAP PHASE BEFORE INTERPOLATION
+    raw_phase_rad = np.angle(fft_result)
+    phase_deg = np.degrees(np.unwrap(raw_phase_rad))
 
     # Compute Minimum Phase response on the active windowed data
     try:
@@ -181,7 +280,10 @@ def compute_frequency_response(
             windowed_data, method='homomorphic', half=False
         )
         min_fft_result = np.fft.rfft(min_phase_signal, n=n_fft)
-        min_phase_deg = np.angle(min_fft_result, deg=True)
+        
+        # UNWRAP MIN PHASE BEFORE INTERPOLATION
+        min_phase_raw_rad = np.angle(min_fft_result)
+        min_phase_deg = np.degrees(np.unwrap(min_phase_raw_rad))
     except Exception:
         min_phase_deg = phase_deg.copy()
 
@@ -218,14 +320,158 @@ def compute_frequency_response(
     except Exception:
         delta_frequency = float(sample_rate / n_fft)
 
-    valid_idx = freqs <= (sample_rate / 2.0)
-    return (
-        freqs[valid_idx],
-        mag_db[valid_idx],
-        phase_deg[valid_idx],
-        min_phase_deg[valid_idx],
-        delta_frequency,
-    )
+    # --- Format output according to frequency grid preference ---
+    if Fgrid_density > 0:
+        # Pre-calculate logarithmic frequency grid
+        octaves = np.log2(end_freq / start_freq)
+        num_points = int(np.ceil(octaves * Fgrid_density))
+        log_freqs = start_freq * (2.0 ** (np.arange(num_points) / Fgrid_density))
+        log_freqs = log_freqs[log_freqs <= end_freq]
+
+        valid_mask = (freqs >= start_freq) & (freqs <= end_freq)
+        if np.sum(valid_mask) > 1:
+            f_interp = freqs[valid_mask]
+            m_interp = mag_db[valid_mask]
+            p_interp = phase_deg[valid_mask]
+            mp_interp = min_phase_deg[valid_mask]
+            
+            res_freqs = log_freqs
+            res_mag = np.interp(res_freqs, f_interp, m_interp, left=m_interp[0], right=m_interp[-1])
+            res_phase = np.interp(res_freqs, f_interp, p_interp, left=p_interp[0], right=p_interp[-1])
+            res_min_phase = np.interp(res_freqs, f_interp, mp_interp, left=mp_interp[0], right=mp_interp[-1])
+        else:
+            res_freqs = log_freqs
+            res_mag = np.zeros_like(log_freqs)
+            res_phase = np.zeros_like(log_freqs)
+            res_min_phase = np.zeros_like(log_freqs)
+        
+        return res_freqs, res_mag, res_phase, res_min_phase, delta_frequency
+    else:
+        # Standard un-interpolated return
+        valid_idx = freqs <= (sample_rate / 2.0)
+        return (
+            freqs[valid_idx],
+            mag_db[valid_idx],
+            phase_deg[valid_idx],
+            min_phase_deg[valid_idx],
+            delta_frequency,
+        )
+
+
+
+class MicCalibrationHandler:
+    """
+    Loads a microphone calibration file once, computes trend lines for extrapolation,
+    and builds an Akima spline interpolator for efficient repeated evaluations.
+    """
+    def __init__(self, filename):
+        self.filename = filename
+        self.is_valid = False
+        self.f_min = None
+        self.f_max = None
+        self.interpolator = None
+        self.poly_coeff_low = None
+        self.poly_coeff_high = None
+        self._load_and_setup()
+
+    def _load_and_setup(self):
+        cal_freqs = []
+        cal_db = []
+        try:
+            with open(self.filename, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith(('*', '#', ';')):
+                        continue
+                    parts = line.replace(',', ' ').split()
+                    if len(parts) >= 2:
+                        try:
+                            f_val = float(parts[0])
+                            db_val = float(parts[1])
+                            cal_freqs.append(f_val)
+                            cal_db.append(db_val)
+                        except ValueError:
+                            continue
+                            
+            if not cal_freqs:
+                print("Warning: Calibration file contained no valid data. No compensation applied.")
+                return
+                
+            cal_freqs = np.array(cal_freqs)
+            cal_db = np.array(cal_db)
+            
+            # Sort calibration data by frequency
+            sort_indices = np.argsort(cal_freqs)
+            cal_freqs = cal_freqs[sort_indices]
+            cal_db = cal_db[sort_indices]
+            
+            self.f_min = cal_freqs[0]
+            self.f_max = cal_freqs[-1]
+            
+            # Base Akima interpolator for the interior region (extrapolation disabled here)
+            self.interpolator = Akima1DInterpolator(cal_freqs, cal_db, extrapolate=False)
+            
+            # --- 1. Low-Frequency Trend Fit (< f_min) ---
+            low_data_mask = cal_freqs <= 100.0
+            if np.sum(low_data_mask) >= 2:
+                fit_freqs = cal_freqs[low_data_mask]
+                fit_db = cal_db[low_data_mask]
+            else:
+                n_pts = min(3, len(cal_freqs))
+                fit_freqs = cal_freqs[:n_pts]
+                fit_db = cal_db[:n_pts]
+            self.poly_coeff_low = np.polyfit(np.log10(fit_freqs), fit_db, 1)
+            
+            # --- 2. High-Frequency Trend Fit (> f_max) with 3-point moving average ---
+            hf_data_mask = cal_freqs >= 10000.0
+            if np.sum(hf_data_mask) >= 3:
+                fit_freqs = cal_freqs[hf_data_mask]
+                fit_db = cal_db[hf_data_mask]
+                
+                window_size = 3
+                weights = np.ones(window_size) / window_size
+                smoothed_db = np.convolve(fit_db, weights, mode='valid')
+                smoothed_freqs = np.convolve(fit_freqs, weights, mode='valid')
+            elif np.sum(hf_data_mask) >= 1:
+                smoothed_freqs = cal_freqs[hf_data_mask]
+                smoothed_db = cal_db[hf_data_mask]
+            else:
+                n_pts = min(3, len(cal_freqs))
+                smoothed_freqs = cal_freqs[-n_pts:]
+                smoothed_db = cal_db[-n_pts:]
+                
+            self.poly_coeff_high = np.polyfit(np.log10(smoothed_freqs), smoothed_db, 1)
+            self.is_valid = True
+            
+        except Exception as e:
+            print(f"Error reading microphone calibration file: {e}")
+            self.is_valid = False
+
+    def get_corrections(self, freqs):
+        """
+        Evaluates the pre-calculated Akima spline and extrapolation models for a given frequency array.
+        """
+        if not self.is_valid:
+            return np.zeros_like(freqs)
+            
+        corrections = np.zeros_like(freqs, dtype=float)
+        
+        # 1. Low-Frequency Extrapolation (< f_min)
+        low_mask = freqs < self.f_min
+        if np.any(low_mask) and self.poly_coeff_low is not None:
+            corrections[low_mask] = np.polyval(self.poly_coeff_low, np.log10(freqs[low_mask]))
+        
+        # 2. High-Frequency Extrapolation (> f_max)
+        high_mask = freqs > self.f_max
+        if np.any(high_mask) and self.poly_coeff_high is not None:
+            corrections[high_mask] = np.polyval(self.poly_coeff_high, np.log10(freqs[high_mask]))
+            
+        # 3. Core Interior Range (f_min <= freqs <= f_max)
+        mid_mask = (freqs >= self.f_min) & (freqs <= self.f_max)
+        if np.any(mid_mask):
+            corrections[mid_mask] = self.interpolator(freqs[mid_mask])
+            
+        return corrections
 
 
 
@@ -236,31 +482,88 @@ def main():
     output_filename = args.output
     
     try:
-        sample_rate, audio_data = read_wav_file(wav_filename)
+        sample_rate, audio_data, impulse_metadata = read_wav_file_plus_info(wav_filename)
     except FileNotFoundError:
         print(f"Error: WAV file '{wav_filename}' not found.")
         return
     except Exception as e:
         print(f"Error reading WAV file: {e}")
         return
+
+    # Extract parameters with fallback defaults if a key wasn't specified in the string
+    v_in1_max = args.spl_corrections.get('V1', 0.0)
+    v_in2_max = args.spl_corrections.get('V2', 0.0)
+    amp_gain  = args.spl_corrections.get('Ag', 0.0)
+    mic_sens  = args.spl_corrections.get('Smic', 0.0)
+    distance  = args.spl_corrections.get('d', 0.0)
+    
+    if args.mic_cal_file is not None:
+        print(f"Using mic cal file: {args.mic_cal_file}")
+
+    measurement_start_freq = impulse_metadata.get("f0sw", 0.0)
+    HF_window_startF = impulse_metadata.get("fhfw", 0.0)
+    measurement_timestamp = datetime.fromtimestamp(impulse_metadata.get("date", 0))
+    RMS_internal_level = impulse_metadata.get("levl",0.0)
+    # Print out validated parameters
+    print(f"\n------------------------ Measurement Parameters: -------------------------------")
+    print(f"             Start Frequency (f0sw): {impulse_metadata.get("f0sw", 0.0)} Hz")
+    print(f"               End Frequency (f1sw): {impulse_metadata.get("f1sw", 0.0)} Hz")
+    print(f"                  Chirp Rate (rchr): {impulse_metadata.get("rchr", 0.0)} seconds/decade Hz")
+    print(f"                 Repetitions (reps): {impulse_metadata.get("reps", 1)}")
+    print(f"              Internal Level (levl): {impulse_metadata.get("levl", 0.0):.3e}")
+    print(f"             HF Window Start (fhfw): {impulse_metadata.get("fhfw", 0.0)} Hz")
+    print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
+    print(f"--------------------------------------------------------------------------------\n")
+
+    
+    # State variables
+    state = {
+        'gate_idx': None,
+        'selecting_gate': False,
+        'freqs': None,
+        'mag_db': None,
+        'phase_deg': None,
+        'min_phase_deg': None,
+        'freq_line_plot': None,
+        'showing_phase': False,
+        'using_min_phase': False,
+        'tukey_alpha': 0.25,
+        'resolution': None,
+        'SPL_factor': None,
+        'start_freq': measurement_start_freq,
+        'end_freq': HF_window_startF
+    }
     
     total_duration_ms = (len(audio_data) / sample_rate) * 1000.0
     print(f"Processing WAV: {args.input_wav}")
     print(f"Sample Rate: {sample_rate} Hz | Total Duration: {total_duration_ms:.2f} ms")
 
     time_axis = np.arange(len(audio_data)) / sample_rate
+
     
-    # Determine y-axis label for magnitude based on whether mic sensitivity is supplied
-    if (
-      args.mic_sensitivity is not None
-      and args.mic_cal is not None
-    ):
-      mag_ylabel = "[dB re 20 uPa @ {args.v_stimulus:.2f}V" 
-      if args.distance is not None:
-        mag_ylabel += "/1m"
+    # Determine y-axis label for magnitude based on whether spl correction factor was supplied
+    if all(v > 0 for v in (v_in1_max, v_in2_max, amp_gain, mic_sens, distance, RMS_internal_level)) and args.mic_cal_file is not None:
+        mag_ylabel = f"SPL [dB re 20 uPa @ 2.83V/1m" 
+        # Calculate the SPL correction factor, Vdrive = RMS_internal_level * v_in1_max
+        SPL_factor = distance / ( 0.001 * mic_sens ) 
+        SPL_factor *= ( v_in2_max / v_in1_max )
+        SPL_factor *= 2.83
+        SPL_factor /= ( RMS_internal_level * v_in1_max * amp_gain )
+        SPL_factor *= 50000.0
+        state['SPL_factor'] = SPL_factor
+        print(f"The SPL conversion factor is {SPL_factor:.3e}\n")
     else:
-      mag_ylabel = "Relative SPL [dB"
+        mag_ylabel = "Relative SPL [dB"
     mag_ylabel += "]"
+
+    
+    # Initialize the microphone calibration handler
+    mic_cal_handler = None
+    if args.mic_cal_file is not None:
+        mic_cal_handler = MicCalibrationHandler(args.mic_cal_file)
+        print(f"Using the microphone calibration data from {args.mic_cal_file}.\n")
+
+    print(f"The data will be calculated using {args.smoothing} points per octave.\n")
     
     # Setup Figure and Subplots
     fig, (ax_time, ax_freq) = plt.subplots(2, 1, figsize=(10, 8.5))
@@ -271,26 +574,13 @@ def main():
     ax_time.set_title(f"Impulse Response: {wav_filename} (Time Domain)")
     ax_time.set_ylabel("Amplitude")
     ax_time.grid(True)
+    ax_time.set_xlim(-0.1, 100.0)
     
     # Initial gate line position set to the end of the data (Green)
-    initial_gate_time_ms = time_axis[-1] * 1000
-    initial_gate_idx = len(audio_data)
+    initial_gate_time_ms = 50.0
+    initial_gate_idx = int( len(audio_data) * initial_gate_time_ms / total_duration_ms )
     gate_line = ax_time.axvline(x=initial_gate_time_ms, color='g', linestyle='--', lw=1.5, label='Window End')
-    
-    # State variables
-    state = {
-        'gate_idx': initial_gate_idx,
-        'selecting_gate': False,
-        'freqs': None,
-        'mag_db': None,
-        'phase_deg': None,
-        'min_phase_deg': None,
-        'freq_line_plot': None,
-        'showing_phase': False,
-        'using_min_phase': False,
-        'tukey_alpha': 0.25,
-        'resolution': None
-    }
+    state['gate_idx'] = initial_gate_idx
     
     # Plot Tukey window function as a red line initially scaled to 95% of current y max
     initial_win = scipy.signal.get_window(('tukey', state['tukey_alpha']), initial_gate_idx)
@@ -429,20 +719,58 @@ def main():
         else:
             # Compute and plot frequency domain data
             freqs, mag_db, phase_deg, min_phase_deg, delta_f = compute_frequency_response(
-                audio_data, sample_rate, state['gate_idx'], state['tukey_alpha'], 
-                args.mic_cal, args.mic_sensitivity, args.v_stimulus,
-                args.distance
+                audio_data, 
+                sample_rate, 
+                state['gate_idx'], 
+                state['tukey_alpha'],
+                state['start_freq'], 
+                state['end_freq'],
+                args.smoothing 
             )
+
+
+            # Create a boolean mask where True means the frequency is VALID
+            # Lower limit: delta_f (resolution)
+            # Upper limit: state['end_freq']
+            valid_mask = (freqs >= delta_f) & (freqs <= state['end_freq'])
+
+            # Apply np.nan in place to all indices where the mask is False
+            mag_db[~valid_mask] = np.nan
+            phase_deg[~valid_mask] = np.nan
+            min_phase_deg[~valid_mask] = np.nan
+
             state['freqs'] = freqs
-            state['mag_db'] = mag_db
             state['phase_deg'] = phase_deg
             state['min_phase_deg'] = min_phase_deg
             state['resolution'] = delta_f
+
+            # Apply SPL corrections: ==============================================
+            # Convert the SPL correction factor into a decibel offset
+            if state['SPL_factor'] is not None and state['SPL_factor'] > 0:
+                spl_offset_db = 20 * np.log10(state['SPL_factor'])
+            else:
+                spl_offset_db = 0.0
+
+            # Apply the system SPL correction factor
+            mag_db += spl_offset_db
+            
+            # 2. Apply the microphone calibration corrections using the pre-loaded handler
+            if mic_cal_handler is not None and mic_cal_handler.is_valid:
+                cal_corrections = mic_cal_handler.get_corrections(freqs)
+                mag_db -= np.asarray(cal_corrections, dtype=float)
+                
+            # Update the dictionary with the fully calibrated magnitude data
+            state['mag_db'] = mag_db
+            
+            # Done applying SPL corections ========================================
+
             
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
             ax_freq.set_xscale('log')
-            ax_freq.set_xlim(20, sample_rate / 2.0)
+            power = np.floor(np.log10(state['resolution']))
+            highest_power_of_10 = 10 ** power
+            ax_freq.set_xlim(highest_power_of_10, sample_rate / 2.0)
             
             ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
             
@@ -463,25 +791,11 @@ def main():
             
             # Construct formatted completion message based on command-line arguments
             print(f"The computed frequency domain data has a resolution of {delta_f:.3g} Hz")
-            print(f"The SPL level is based on the following:")
-            if args.mic_sensitivity is not None:
-                print(f"   \u2022 a microphone sensitivity of {args.mic_sensitivity} mV/Pa")
-            if args.mic_cal is not None:
-                print(f"   \u2022 microphone calibration data from file {args.mic_cal}")
-            if args.v_stimulus is not None:
-                print(f"   \u2022 a stimulus RMS voltage of of {args.v_stimulus} Volts")
-            if args.distance is not None:
-                print(f"   \u2022 a measurement distance of {args.distance} meters")
 
             # Print information about the frequency magnitude values
             SPL_info_text = "SPL units for computed frequency response = "
-            if (
-              args.mic_sensitivity is not None
-              and args.mic_cal is not None
-            ):
-              SPL_info_text += "dB re 20 uPa @ {args.v_stimulus:.2f}V" 
-              if args.distance is not None:
-                SPL_info_text += "/1m"
+            if state['SPL_factor'] is not None and mic_cal_handler is not None:
+              SPL_info_text += "dB re 20 uPa @ 2.83V/1m" 
             else:
               SPL_info_text += "Relative SPL Level in dB"
             print(f"{SPL_info_text}")
@@ -493,7 +807,8 @@ def main():
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
             ax_freq.set_xscale('log')
-            ax_freq.set_xlim(20, sample_rate / 2.0)
+            highest_power_of_10 = 10 ** power
+            ax_freq.set_xlim(highest_power_of_10, sample_rate / 2.0)
             
             ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
             
@@ -553,17 +868,15 @@ def main():
             fig.canvas.draw_idle()
 
     def handle_save_exit_button(event):
-        if state['freqs'] is not None:
-            phase_to_save = state['min_phase_deg'] if state['using_min_phase'] else state['phase_deg']
-            write_frd_file(output_filename, state['freqs'], state['mag_db'], phase_to_save)
+        if state['freqs'] is None:
+            print("The frequency response data has not yet been computed!")
+            return
+        phase_to_save = state['min_phase_deg'] if state['using_min_phase'] else state['phase_deg']
+        if state['using_min_phase']:
+            print(f"Saving FRD data files (minimum phase response)...")
         else:
-            print("No frequency data computed. Computing response before saving...")
-            freqs, mag_db, phase_deg, min_phase_deg = compute_frequency_response(
-                audio_data, sample_rate, state['gate_idx'], state['tukey_alpha'], 
-                args.mic_cal, args.mic_sensitivity
-            )
-            phase_to_save = min_phase_deg if state['using_min_phase'] else phase_deg
-            write_frd_file(output_filename, freqs, mag_db, phase_to_save)
+            print(f"Saving FRD data files...")
+        write_frd_file(output_filename, state['freqs'], state['mag_db'], phase_to_save)
         
         print("Closing application.")
         plt.close('all')
@@ -576,6 +889,27 @@ def main():
     btn_min.on_clicked(handle_min_phase_button)
     btn_save_exit.on_clicked(handle_save_exit_button)
     
+    # Access the toolbar via the canvas manager
+    toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
+
+    if toolbar is not None:
+        # For Qt Backends (PyQt / PySide)
+        if hasattr(toolbar, 'actions'):
+            for action in toolbar.actions():
+                text = action.text().lower()
+                tooltip = action.toolTip().lower()
+                if 'home' in text or 'reset' in text or 'home' in tooltip or 'reset' in tooltip:
+                    toolbar.removeAction(action)
+                    
+        # For Tkinter (TkAgg) Backend
+        elif hasattr(toolbar, '_buttons'):
+            if 'Home' in toolbar._buttons:
+                toolbar._buttons['Home'].pack_forget() # Hide the home button widget
+
+    # Trigger default zoom tool if desired
+    if toolbar is not None:
+        toolbar.zoom()
+
     plt.show()
 
 if __name__ == "__main__":

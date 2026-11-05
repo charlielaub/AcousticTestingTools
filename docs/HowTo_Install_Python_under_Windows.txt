@@ -5,19 +5,19 @@ NOTE: The most critical step for Windows users is ensuring Python is added to yo
 Step 1: Install Python on Windows
 
 1. Open your browser and go to the official website: python.org/downloads.
-2. Click the yellow "Download Python 3.x.x" button to download the latest version for Windows.
+2. Click the yellow "Download Python install manager" button to download the latest version for Windows.
 3. Run the downloaded .exe installer file.
-4. Crucial Step: At the bottom of the very first window, check the box that says "Add python.exe to PATH". If you skip this, Windows will not recognize Python commands in your terminal.
+4. CRUCIAL STEP: At the bottom of the very first window, check the box that says "Add python.exe to PATH". If you skip this, Windows will not recognize Python commands in your terminal.
 5. Click "Install Now" at the top of the window and wait for the installation to finish.
 
 Step 2: Open the Command Prompt (CMD)
 
-To install the modules, you need to use the Windows command line interface:
-1. Press the Windows Key on your keyboard.
-2. Type cmd into the search bar.
-3. Click on Command Prompt to open the terminal window.
+To install the modules, you need to type commands into the Windows command terminal:
+1. Open a command terminal window. There are two ways (choose one):
+1A. Press the Windows Key on your keyboard. Type cmd into the search bar and then press Enter. This opens the terminal in your user directory.
+1B. To open the terminal into a paritcular directory: Press the Windows Key + e to open the File Explorer. Navigate to the directory you want to work in. Click in the field at the top of the window where it shows the current directory and enter cmd. Press enter to open the terminal. Typing dir in the terminal will confirm that you are in the desired directory.
 
-Step 3: Install the Modules via pip
+Step 3: Using the Terminal, Install the Modules via pip
 
 Copy and paste the following command into your Command Prompt window, then press Enter. Python's built-in package manager (pip) will automatically download and install all four modules along with their required dependencies:
   pip install pandas numpy matplotlib scipy
@@ -29,12 +29,13 @@ Step 4: Verify the Installation
 You can test if everything was installed correctly right inside the Command Prompt. Type the following commands:
 1. Type 
   python 
-and press Enter (this opens the interactive Python shell, indicated by >>>).
-2. Copy, paste, and run this code script:
-  import pandas as pd
-  import numpy as np
-  import matplotlib.pyplot as plt
-  import scipy
-  print("All modules installed successfully!")
+and press Enter. This opens the interactive Python shell and the cursor will change to ">>>".
+2. Copy the lines below using control-c, paste them into the terminal using control-v or by right clicking with the mouse in the terminal window, and then press Enter:
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy
+print("All modules installed successfully!")
 
-3. If it prints "All modules installed successfully!" without any error messages, your setup is complete. Type exit() and press Enter to leave the Python shell.
+3. If it prints "All modules installed successfully!" without any error messages, your setup is complete. 
+4. Type exit() and press Enter to leave the Python shell.

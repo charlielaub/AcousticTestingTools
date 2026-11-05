@@ -1552,8 +1552,11 @@ std::vector<float> compute_true_h1_time_domain(const DataContainer& alignment_da
     pocketfft::stride_t stride_in_bwd = { sizeof(std::complex<float>) };
     pocketfft::stride_t stride_out_bwd = { sizeof(float) };
 
+    // Apply the 1/N normalization to the inverse transform!
+    float ifft_norm = 1.0f / static_cast<float>(signal_length);
+
     pocketfft::c2r(shape_bwd, stride_in_bwd, stride_out_bwd, axes, pocketfft::BACKWARD, 
-                   H1_f.data(), impulse_response.data(), 1.0f);
+                   H1_f.data(), impulse_response.data(), ifft_norm);
 
     return impulse_response;
 }
