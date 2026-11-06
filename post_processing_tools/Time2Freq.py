@@ -77,6 +77,10 @@ def parse_arguments():
             default=None,
             help="Path to microphone calibration file (*.mic or *.cal)."
     )
+    parser.add_argument("--AES17_SPL", 
+            action="store_true",
+            help="If set, use the AES17 SPL level convention."
+    )
     # Compact inline configuration string
     parser.add_argument("-k","--spl_corrections", 
             type=parse_inline_config,
@@ -167,6 +171,7 @@ def run_farina_analysis(
     gate_end_idx,
     timezero_sample_idx,
     tukey_alpha,
+    h1_delay_seconds,
     max_harmonic=5
 ):
     """
@@ -198,6 +203,8 @@ def run_farina_analysis(
         The absolute sample index corresponding to the time=0 position.
     tukey_alpha : float
         The shape parameter for the Tukey window applied to each impulse slice.
+    h1_delay_seconds : float
+        The latency obtained from the H1 estimated impulse. Used to correct the phase angle.
     max_harmonic : int, optional
         The maximum harmonic order to extract and analyze (default is 5).
 
@@ -234,7 +241,6 @@ def run_farina_analysis(
         log_freqs = log_freqs[log_freqs <= end_freq]
 
     # Find the true absolute peak of the fundamental impulse 
-    # (Constrain search near the provided timezero to avoid random noise spikes)
     search_start = max(0, timezero_sample_idx - int(sample_rate * 0.1))
     search_end = min(len(impulse_full), timezero_sample_idx + int(sample_rate * 0.1))
     main_peak_idx = search_start + np.argmax(np.abs(impulse_full[search_start:search_end]))
@@ -258,20 +264,17 @@ def run_farina_analysis(
             shift_prev = get_shift(k - 1)
             
             dist_to_next = shift_next - shift_samples
-            dist_to_prev = shift_samples - shift_prev  # Corrected: Works uniformly for all k >= 2
+            dist_to_prev = shift_samples - shift_prev 
             
-            # Determine the relative radii of the fundamental gate
             fund_left_radius = max(0, main_peak_idx - gate_start_idx)
             fund_right_radius = max(0, gate_end_idx - main_peak_idx)
             
-            # Use 90% of the gap, BUT never exceed the fundamental's window size
             safe_radius_left = min(int(dist_to_next * 0.9), fund_left_radius)
             safe_radius_right = min(int(dist_to_prev * 0.9), fund_right_radius)
             
             current_gate_start = harmonic_peak_idx - safe_radius_left
             current_gate_end = harmonic_peak_idx + safe_radius_right
         
-        # Ensure indices stay within valid array bounds
         current_gate_start = max(0, current_gate_start)
         current_gate_end = min(len(impulse_full), current_gate_end)
         
@@ -280,7 +283,6 @@ def run_farina_analysis(
         else:
             slice_audio = impulse_full[current_gate_start:current_gate_end]
         
-        # Apply Tukey window
         if len(slice_audio) > 0:
             tukey_w = signal.windows.tukey(len(slice_audio), alpha=tukey_alpha)
             windowed_slice = slice_audio * tukey_w
@@ -288,27 +290,25 @@ def run_farina_analysis(
             windowed_slice = np.array([0.0])
             
         # -------------------------------------------------------------
-        # LATENCY FIX: Align the FFT to the true time=0 reference, not the peak.
-        # This preserves the physical time-of-flight as true phase rotation.
+        # LATENCY FIX: Reference Phase Locking
+        # We override the fractional Farina convolution delay by anchoring
+        # the total phase strictly to the provided H1 time-of-flight.
         # -------------------------------------------------------------
-        harmonic_t0_idx = timezero_sample_idx - shift_samples
-        t0_offset = harmonic_t0_idx - current_gate_start
         
-        # Roll the array so the true t=0 sits at index 0 of the FFT.
-        # (Tukey window ensures wrapped tails are cleanly tapered to 0.0)
-        windowed_slice_shifted = np.roll(windowed_slice, -t0_offset)
+        # 1. Compute FFT spectrum on the raw, unshifted slice
+        fft_vals = np.fft.rfft(windowed_slice)
+        raw_fft_freqs = np.fft.rfftfreq(len(windowed_slice), 1.0 / sample_rate)
         
-        # Compute FFT spectrum on the shifted slice
-        fft_vals = np.fft.rfft(windowed_slice_shifted)
-        raw_fft_freqs = np.fft.rfftfreq(len(windowed_slice_shifted), 1.0 / sample_rate)
+        # 2. Find where the physical peak sits inside our current slice
+        peak_offset_in_slice = harmonic_peak_idx - current_gate_start
+        peak_offset_seconds = peak_offset_in_slice / sample_rate
         
-        # MAP TO FUNDAMENTAL: Divide by k so distortion is plotted 
-        # against the stimulus frequency that caused it.
+        # 3. Apply the exact phase shift to match the H1 reference delay
+        phase_shift_rad = -2.0 * np.pi * raw_fft_freqs * (h1_delay_seconds - peak_offset_seconds)
+        fft_vals = fft_vals * np.exp(1j * phase_shift_rad)
+        
         fft_freqs = raw_fft_freqs / k 
-        
         delta_f = sample_rate / len(windowed_slice) if len(windowed_slice) > 0 else 0.0
-        
-        # Compute exact magnitude natively
         mag_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)
 
         # -------------------------------------------------------------
@@ -322,33 +322,28 @@ def run_farina_analysis(
         # PHASE CORRECTION 2: Min Phase requires full double-sided FFT
         # -------------------------------------------------------------
         try:
-            # Recompute a full FFT specifically for the Hilbert transform
-            full_fft = np.fft.fft(windowed_slice_shifted)
+            full_fft = np.fft.fft(windowed_slice)
             log_mag_full = np.log(np.abs(full_fft) + 1e-12)
             
-            # The imaginary part of the analytic signal of the full log-magnitude 
-            # yields the exact minimum phase relation.
             analytic_sig = signal.hilbert(log_mag_full)
             min_phase_full_rad = -analytic_sig.imag
             
-            # Truncate back to the rfft length to match our standard frequency arrays
             min_phase_rad = min_phase_full_rad[:len(fft_vals)]
-            
-            # Unwrap the minimum phase as well before it hits the interpolator
             min_phase_unwrapped_rad = np.unwrap(min_phase_rad)
             min_phase_deg = np.degrees(min_phase_unwrapped_rad)
             
         except Exception:
             min_phase_deg = np.zeros_like(phase_deg)
             
-        # Format output according to frequency grid preference
+        # -------------------------------------------------------------
+        # INTERPOLATION & MODULO WRAPPING
+        # -------------------------------------------------------------
         if Fgrid_density > 0:
             valid_mask = (fft_freqs >= start_freq) & (fft_freqs <= end_freq)
             if np.sum(valid_mask) > 1:
                 f_interp = fft_freqs[valid_mask]
                 m_interp = mag_db[valid_mask]
                 
-                # Now passing the UNWRAPPED degrees into the interpolator
                 p_interp = phase_deg[valid_mask]          
                 mp_interp = min_phase_deg[valid_mask]     
                 
@@ -356,6 +351,10 @@ def run_farina_analysis(
                 res_mag = np.interp(res_freqs, f_interp, m_interp, left=m_interp[0], right=m_interp[-1])
                 res_phase = np.interp(res_freqs, f_interp, p_interp, left=p_interp[0], right=p_interp[-1])
                 res_min_phase = np.interp(res_freqs, f_interp, mp_interp, left=mp_interp[0], right=mp_interp[-1])
+                
+                # Re-wrap interpolated phase to customary [-180, 180]
+                res_phase = (res_phase + 180.0) % 360.0 - 180.0
+                res_min_phase = (res_min_phase + 180.0) % 360.0 - 180.0
             else:
                 res_freqs = log_freqs
                 res_mag = np.zeros_like(log_freqs)
@@ -370,6 +369,10 @@ def run_farina_analysis(
                 'delta_frequency': delta_f
             }
         else:
+            # Re-wrap un-interpolated phase to customary [-180, 180]
+            phase_deg = (phase_deg + 180.0) % 360.0 - 180.0
+            min_phase_deg = (min_phase_deg + 180.0) % 360.0 - 180.0
+            
             harmonic_results[k] = {
                 'freqs': fft_freqs,
                 'mag_db': mag_db,
@@ -927,7 +930,8 @@ def main():
             'FREQ': None,
             'THD': None
         },
-        'y_cid': None
+        'y_cid': None,
+        'latency': None
     }
     
     # 1. Compute the full impulse response using Farina deconvolution
@@ -957,6 +961,15 @@ def main():
     t0_sample_index = window_start + optimal_lag
     print(f"The corrected time=0 sample index in full_ir occurs at sample {t0_sample_index} of {n_samples} total samples.")
 
+    # -------------------------------------------------------------------------
+    # Extract pure mathematical time-of-flight from H1 Reference
+    # -------------------------------------------------------------------------
+    # The pure time-of-flight is exactly the position of the absolute peak in the H1 data
+    h1_peak_idx = np.argmax(np.abs(h1_impulse))
+    state['latency'] = float(h1_peak_idx) / H1_sample_rate
+    
+    print(f"H1 Reference Time-of-Flight computed as: {state['latency'] * 1000:.3f} ms")
+    
     # Construct the corrected time axis where t = 0 matches the measurement start
     time_axis = (np.arange(len(full_ir)) - t0_sample_index) / sample_rate * 1000.0
 
@@ -1119,7 +1132,7 @@ def main():
     ax_btn_min          = plt.axes([0.57,  btn_y, 0.22, btn_h])
     ax_btn_save_exit    = plt.axes([0.81,  btn_y, 0.15, btn_h])
     
-    btn_gate = Button(ax_btn_gate, 'Place Gate', color='aliceblue', hovercolor='palegreen')
+    btn_gate = Button(ax_btn_gate, 'Place Gates', color='aliceblue', hovercolor='palegreen')
     btn_calc = Button(ax_btn_calc, 'Compute/Clear', color='aliceblue', hovercolor='palegreen')
     btn_view = Button(ax_btn_view, 'Toggle Mag/Phase', color='aliceblue', hovercolor='palegreen')
     btn_min  = Button(ax_btn_min, 'Toggle Phase-MinPhase', color='aliceblue', hovercolor='palegreen')
@@ -1650,6 +1663,7 @@ def main():
                 gate_end_idx=state['gate_idx'],
                 timezero_sample_idx=t0_sample_index,
                 tukey_alpha=state['tukey_alpha'],
+                h1_delay_seconds=state['latency'],
                 max_harmonic=state['hd_max']
             )
             
@@ -1660,6 +1674,11 @@ def main():
             else:
                 spl_offset_db = 0.0
 
+            #Apply correction to SPL level specific to the Farina method unless
+            #  the user wishes to obtain the AES17 SPL level
+            if not args.AES17_SPL: 
+                spl_offset_db -= 3.01
+            
             # Loop through all k harmonics stored in the dictionary
             for k, harmonic_data in results.items():
                 # Skip top-level summary keys (like 'freqs', 'thd_percent', etc.)

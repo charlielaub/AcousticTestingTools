@@ -15,12 +15,12 @@ import scipy.io.wavfile as wav
 import scipy.signal
 from scipy.interpolate import Akima1DInterpolator
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 from matplotlib.widgets import Button, TextBox
 from matplotlib.ticker import LogLocator
 import argparse, textwrap
 import struct
 from datetime import datetime
-
 
 
 def parse_inline_config(arg_str):
@@ -45,13 +45,14 @@ def parse_inline_config(arg_str):
     return config
 
 
-
 def parse_arguments():
     """
     Parses command-line arguments for input WAV file, output FRD file,
-    optional microphone calibration, sensitivity parameters, and amplifier gain.
+    optional microphone calibration, sensitivity parameters, amplifier gain,
+    and automated mode flags.
     """
-    parser = argparse.ArgumentParser(description="Process loudspeaker impulse response WAV file and export to FRD format (Interactive GUI).")
+    parser = argparse.ArgumentParser(description="Process loudspeaker impulse response WAV file and export to FRD format.",
+            formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("input_wav", 
             type=str, 
             help="Path to the input impulse response WAV file."
@@ -59,7 +60,7 @@ def parse_arguments():
     parser.add_argument("-o", "--output", 
             type=str, 
             default="FR.frd",
-            help="Path to save the output in FRD format (default: FR.frd)."
+            help="File and pathname to save the output in FRD format (default: FR.frd)."
     )
     parser.add_argument("-s","--smoothing", 
             type=int, 
@@ -70,6 +71,26 @@ def parse_arguments():
             type=str, 
             default=None,
             help="Path to microphone calibration file (*.mic or *.cal)."
+    )
+    
+    # --- AUTOMATED MODE ARGUMENTS ---
+    parser.add_argument("-g","--end_gate_time", 
+            type=float, 
+            default=None,
+            help="Automated mode trigger: End gate time in milliseconds. If provided, the script runs headless without launching the GUI."
+    )
+    parser.add_argument("-a","--tukey_alpha", 
+            type=float, 
+            default=0.1,
+            help="Tukey window alpha value (default: 0.1)."
+    )
+    parser.add_argument("-m","--min_phase", 
+            action="store_true",
+            help="If set, uses minimum phase instead of regular phase. Applies to automated mode output, and sets the default view in the GUI."
+    )
+    parser.add_argument("--AES17_SPL", 
+            action="store_true",
+            help="If set, use the AES17 SPL level convention."
     )
     # Compact inline configuration string
     parser.add_argument("-k","--spl_corrections", 
@@ -90,15 +111,12 @@ def parse_arguments():
     return parser.parse_args()
 
 
-
 def read_wav_file_plus_info(filename):
     """
     Reads a 32-bit float mono WAV file and extracts the audio data (as a NumPy array),
     the sample rate, and custom xDAT metadata into a dictionary.
-    Optimized with NumPy frombuffer for high speed and low memory usage.
     """
     with open(filename, "rb") as f:
-        # 1. Verify RIFF header
         riff = f.read(4)
         if riff != b"RIFF":
             raise ValueError("Not a valid RIFF WAV file.")
@@ -112,7 +130,6 @@ def read_wav_file_plus_info(filename):
         audio_data = np.array([], dtype=np.float32)
         custom_metadata = {}
 
-        # 2. Traverse file chunks iteratively
         while True:
             chunk_id = f.read(4)
             if not chunk_id or len(chunk_id) < 4:
@@ -128,14 +145,11 @@ def read_wav_file_plus_info(filename):
                 audio_format, num_channels, sample_rate = struct.unpack(
                     "<HHI", fmt_data[:8]
                 )
-                if audio_format != 3:  # 3 indicates IEEE float format
-                    raise ValueError(
-                        "WAV file is not in 32-bit IEEE float format (format tag 3)."
-                    )
+                if audio_format != 3:
+                    raise ValueError("WAV file is not in 32-bit IEEE float format (format tag 3).")
 
             elif chunk_id == b"data":
                 data_bytes = f.read(chunk_size)
-                # Zero-copy memory mapping via NumPy frombuffer
                 audio_data = np.frombuffer(data_bytes, dtype=np.float32).copy()
 
             elif chunk_id == b"xDAT":
@@ -150,18 +164,14 @@ def read_wav_file_plus_info(filename):
                     else:
                         val = struct.unpack("<f", xdat_data[offset : offset + 4])[0]
                     offset += 4
-
                     custom_metadata[tag] = val
             else:
-                # Skip unknown chunks
                 f.seek(chunk_size, 1)
 
-            # Handle RIFF word-alignment padding
             if chunk_size % 2 != 0:
                 f.seek(1, 1)
 
     return sample_rate, audio_data, custom_metadata
-
 
 
 def read_mic_cal_file(filename, freqs):
@@ -199,40 +209,27 @@ def read_mic_cal_file(filename, freqs):
         return np.zeros_like(freqs)
 
 
-
 def write_frd_file(filename, freqs, mag_db, phase_deg):
     """
     Saves frequency domain data to an FRD format text file.
-    - Frequency: Fixed float with 1 decimal place (Hz)
-    - Magnitude: 2 decimal places (dB)
-    - Phase: 1 decimal place (degrees)
-    - Automatically skips any NaN or infinite values.
     """
     try:
-        # Ensure inputs are numpy arrays for safe masking
         freqs = np.asarray(freqs)
         mag_db = np.asarray(mag_db)
         phase_deg = np.asarray(phase_deg)
         
-        # Create a mask that keeps only valid, finite numbers across all arrays
         valid_mask = np.isfinite(freqs) & np.isfinite(mag_db) & np.isfinite(phase_deg)
         
         with open(filename, 'w') as f:
             f.write("* Frequency Response Data (FRD)\n")
             f.write("* Columns: Frequency (Hz), Magnitude (dB), Phase (deg)\n")
             
-            # Iterate only over the filtered, valid data points
             for freq, mag, phase in zip(freqs[valid_mask], mag_db[valid_mask], phase_deg[valid_mask]):
-                freq_str = f"{freq:.1f}"
-                mag_str = f"{mag:.2f}"
-                phase_str = f"{phase:.1f}"
+                f.write(f"{freq:.1f}\t{mag:.2f}\t{phase:.1f}\n")
                 
-                f.write(f"{freq_str}\t{mag_str}\t{phase_str}\n")
-                
-        print(f"   ...saved {filename}")
+        print(f"{filename}")
     except Exception as e:
-        print(f"WARNING: The following error was encountered when attempting to save file {filename}: {e}")
-
+        print(f" WARNING: The following error was encountered when attempting to save file {filename}: {e}")
 
 
 
@@ -246,23 +243,18 @@ def compute_frequency_response(
     Fgrid_density
 ):
     """Applies a Tukey window, computes standard FFT and minimum phase FFT,
-    and interpolates the response to Fgrid_density points per octave.
-    Returns frequencies, magnitude (dB), standard phase (deg), minimum phase (deg), 
-    and delta_frequency (Hz).
+    and interpolates the response.
     """
     gate_end_idx = max(10, min(gate_end_idx, len(audio_data)))
-
-    # Get Tukey window using scipy.signal.get_window
     win = scipy.signal.get_window(('tukey', tukey_alpha), gate_end_idx)
-
-    # Restrict windowed_data strictly to the gated segment length
     windowed_data = audio_data[:gate_end_idx].astype(np.float32) * win
-
-    # Zero-pad for smoother frequency resolution in the FFT
     n_fft = max(2048, 2 * len(windowed_data))
 
     # Standard FFT response
     fft_result = np.fft.rfft(windowed_data, n=n_fft)
+    
+    # Calculate the frequency bins (This is the line that was missing!)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
     
     # 1. Get raw magnitude (No division by sample_rate or window sum needed!)
     mag = np.abs(fft_result)
@@ -270,34 +262,25 @@ def compute_frequency_response(
     # 2. Calculate dB
     mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12))
     
-    # UNWRAP PHASE BEFORE INTERPOLATION
     raw_phase_rad = np.angle(fft_result)
     phase_deg = np.degrees(np.unwrap(raw_phase_rad))
 
-    # Compute Minimum Phase response on the active windowed data
     try:
         min_phase_signal = scipy.signal.minimum_phase(
             windowed_data, method='homomorphic', half=False
         )
         min_fft_result = np.fft.rfft(min_phase_signal, n=n_fft)
-        
-        # UNWRAP MIN PHASE BEFORE INTERPOLATION
         min_phase_raw_rad = np.angle(min_fft_result)
         min_phase_deg = np.degrees(np.unwrap(min_phase_raw_rad))
     except Exception:
         min_phase_deg = phase_deg.copy()
 
-    # --- Frequency Resolution Calculation via NCC & IFFT ---
     try:
-        # 1. Generate minimum phase time response using amplitude and minimum phase
         min_phase_rad = np.deg2rad(min_phase_deg)
         min_complex_spectrum = mag * np.exp(1j * min_phase_rad)
         impulse_minphase = np.fft.irfft(min_complex_spectrum, n=n_fft)
-
-        # Truncate impulse_minphase back to the window length for accurate cross-correlation
         impulse_minphase_trimmed = impulse_minphase[: len(windowed_data)]
 
-        # 2. Compute Normalized Cross-Correlation (NCC) between the gated data and min-phase impulse
         f = windowed_data - np.mean(windowed_data)
         g = impulse_minphase_trimmed - np.mean(impulse_minphase_trimmed)
         xcorr = scipy.signal.correlate(f, g, mode='full')
@@ -305,11 +288,8 @@ def compute_frequency_response(
         if norm > 0:
             xcorr /= norm
 
-        # 3. Find peak position, convert to time, and calculate delta frequency
         ncc_max_pos = np.argmax(xcorr)
-        # In 'full' mode, the zero-lag/start alignment offset is len(g) - 1
         peak_index_offset = abs(ncc_max_pos - (len(g) - 1))
-        
         ncc_max_time = float(peak_index_offset) / sample_rate
         gate_end_time = float(gate_end_idx) / sample_rate
 
@@ -320,9 +300,7 @@ def compute_frequency_response(
     except Exception:
         delta_frequency = float(sample_rate / n_fft)
 
-    # --- Format output according to frequency grid preference ---
     if Fgrid_density > 0:
-        # Pre-calculate logarithmic frequency grid
         octaves = np.log2(end_freq / start_freq)
         num_points = int(np.ceil(octaves * Fgrid_density))
         log_freqs = start_freq * (2.0 ** (np.arange(num_points) / Fgrid_density))
@@ -345,9 +323,12 @@ def compute_frequency_response(
             res_phase = np.zeros_like(log_freqs)
             res_min_phase = np.zeros_like(log_freqs)
         
+        # Re-wrap universally for the Fgrid_density > 0 path
+        res_phase = (res_phase + 180.0) % 360.0 - 180.0
+        res_min_phase = (res_min_phase + 180.0) % 360.0 - 180.0
+        
         return res_freqs, res_mag, res_phase, res_min_phase, delta_frequency
     else:
-        # Standard un-interpolated return
         valid_idx = freqs <= (sample_rate / 2.0)
         return (
             freqs[valid_idx],
@@ -356,6 +337,41 @@ def compute_frequency_response(
             min_phase_deg[valid_idx],
             delta_frequency,
         )
+
+
+def process_and_apply_corrections(audio_data, sample_rate, gate_idx, tukey_alpha, start_freq, end_freq, smoothing, SPL_factor, use_AES17, mic_cal_handler):
+    """
+    Helper function to run the DSP calculation and apply all masks and SPL/Mic offsets.
+    Shared by both the GUI and Headless automated pathways.
+    """
+    freqs, mag_db, phase_deg, min_phase_deg, delta_f = compute_frequency_response(
+        audio_data, sample_rate, gate_idx, tukey_alpha, start_freq, end_freq, smoothing
+    )
+
+    valid_mask = (freqs >= delta_f) & (freqs <= end_freq)
+    mag_db[~valid_mask] = np.nan
+    phase_deg[~valid_mask] = np.nan
+    min_phase_deg[~valid_mask] = np.nan
+
+    # Apply SPL corrections
+    if SPL_factor is not None and SPL_factor > 0:
+        spl_offset_db = 20 * np.log10(SPL_factor)
+    else:
+        spl_offset_db = 0.0
+
+    #  If the user wishes to obtain the AES17 SPL level, add 3.01dB
+    if use_AES17:
+        spl_offset_db += 3.01
+
+    
+    mag_db += spl_offset_db
+    
+    # Apply microphone calibration corrections
+    if mic_cal_handler is not None and mic_cal_handler.is_valid:
+        cal_corrections = mic_cal_handler.get_corrections(freqs)
+        mag_db -= np.asarray(cal_corrections, dtype=float)
+        
+    return freqs, mag_db, phase_deg, min_phase_deg, delta_f
 
 
 
@@ -400,7 +416,6 @@ class MicCalibrationHandler:
             cal_freqs = np.array(cal_freqs)
             cal_db = np.array(cal_db)
             
-            # Sort calibration data by frequency
             sort_indices = np.argsort(cal_freqs)
             cal_freqs = cal_freqs[sort_indices]
             cal_db = cal_db[sort_indices]
@@ -408,10 +423,8 @@ class MicCalibrationHandler:
             self.f_min = cal_freqs[0]
             self.f_max = cal_freqs[-1]
             
-            # Base Akima interpolator for the interior region (extrapolation disabled here)
             self.interpolator = Akima1DInterpolator(cal_freqs, cal_db, extrapolate=False)
             
-            # --- 1. Low-Frequency Trend Fit (< f_min) ---
             low_data_mask = cal_freqs <= 100.0
             if np.sum(low_data_mask) >= 2:
                 fit_freqs = cal_freqs[low_data_mask]
@@ -422,7 +435,6 @@ class MicCalibrationHandler:
                 fit_db = cal_db[:n_pts]
             self.poly_coeff_low = np.polyfit(np.log10(fit_freqs), fit_db, 1)
             
-            # --- 2. High-Frequency Trend Fit (> f_max) with 3-point moving average ---
             hf_data_mask = cal_freqs >= 10000.0
             if np.sum(hf_data_mask) >= 3:
                 fit_freqs = cal_freqs[hf_data_mask]
@@ -448,25 +460,19 @@ class MicCalibrationHandler:
             self.is_valid = False
 
     def get_corrections(self, freqs):
-        """
-        Evaluates the pre-calculated Akima spline and extrapolation models for a given frequency array.
-        """
         if not self.is_valid:
             return np.zeros_like(freqs)
             
         corrections = np.zeros_like(freqs, dtype=float)
         
-        # 1. Low-Frequency Extrapolation (< f_min)
         low_mask = freqs < self.f_min
         if np.any(low_mask) and self.poly_coeff_low is not None:
             corrections[low_mask] = np.polyval(self.poly_coeff_low, np.log10(freqs[low_mask]))
         
-        # 2. High-Frequency Extrapolation (> f_max)
         high_mask = freqs > self.f_max
         if np.any(high_mask) and self.poly_coeff_high is not None:
             corrections[high_mask] = np.polyval(self.poly_coeff_high, np.log10(freqs[high_mask]))
             
-        # 3. Core Interior Range (f_min <= freqs <= f_max)
         mid_mask = (freqs >= self.f_min) & (freqs <= self.f_max)
         if np.any(mid_mask):
             corrections[mid_mask] = self.interpolator(freqs[mid_mask])
@@ -474,9 +480,7 @@ class MicCalibrationHandler:
         return corrections
 
 
-
 def main():
-    # Parse command-line arguments
     args = parse_arguments()
     wav_filename = args.input_wav
     output_filename = args.output
@@ -490,7 +494,6 @@ def main():
         print(f"Error reading WAV file: {e}")
         return
 
-    # Extract parameters with fallback defaults if a key wasn't specified in the string
     v_in1_max = args.spl_corrections.get('V1', 0.0)
     v_in2_max = args.spl_corrections.get('V2', 0.0)
     amp_gain  = args.spl_corrections.get('Ag', 0.0)
@@ -504,19 +507,58 @@ def main():
     HF_window_startF = impulse_metadata.get("fhfw", 0.0)
     measurement_timestamp = datetime.fromtimestamp(impulse_metadata.get("date", 0))
     RMS_internal_level = impulse_metadata.get("levl",0.0)
-    # Print out validated parameters
+
     print(f"\n------------------------ Measurement Parameters: -------------------------------")
-    print(f"             Start Frequency (f0sw): {impulse_metadata.get("f0sw", 0.0)} Hz")
-    print(f"               End Frequency (f1sw): {impulse_metadata.get("f1sw", 0.0)} Hz")
-    print(f"                  Chirp Rate (rchr): {impulse_metadata.get("rchr", 0.0)} seconds/decade Hz")
-    print(f"                 Repetitions (reps): {impulse_metadata.get("reps", 1)}")
-    print(f"              Internal Level (levl): {impulse_metadata.get("levl", 0.0):.3e}")
-    print(f"             HF Window Start (fhfw): {impulse_metadata.get("fhfw", 0.0)} Hz")
-    print(f"                   Timestamp (date): {measurement_timestamp.strftime("%Y-%m-%d %H:%M:%S")}")
+    print(f"             Start Frequency (f0sw): {impulse_metadata.get('f0sw', 0.0)} Hz")
+    print(f"               End Frequency (f1sw): {impulse_metadata.get('f1sw', 0.0)} Hz")
+    print(f"                 Chirp Rate (rchr): {impulse_metadata.get('rchr', 0.0)} seconds/decade Hz")
+    print(f"                 Repetitions (reps): {impulse_metadata.get('reps', 1)}")
+    print(f"              Internal Level (levl): {impulse_metadata.get('levl', 0.0):.3e}")
+    print(f"             HF Window Start (fhfw): {impulse_metadata.get('fhfw', 0.0)} Hz")
+    print(f"                   Timestamp (date): {measurement_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"--------------------------------------------------------------------------------\n")
 
+    total_duration_ms = (len(audio_data) / sample_rate) * 1000.0
+    print(f"Processing WAV: {args.input_wav}")
+    print(f"Sample Rate: {sample_rate} Hz | Total Duration: {total_duration_ms:.2f} ms")
+
+    time_axis = np.arange(len(audio_data)) / sample_rate
     
-    # State variables
+    SPL_factor = None
+    if all(v > 0 for v in (v_in1_max, v_in2_max, amp_gain, mic_sens, distance, RMS_internal_level)) and args.mic_cal_file is not None:
+        mag_ylabel = f"SPL [dB re 20 uPa @ 2.83V/1m" 
+        SPL_factor = distance / ( 0.001 * mic_sens ) 
+        SPL_factor *= ( v_in2_max / v_in1_max )
+        SPL_factor *= 2.83
+        SPL_factor /= amp_gain
+        SPL_factor *= 50000.0
+        print(f"The SPL conversion factor is {SPL_factor:.3e}\n")
+    else:
+        mag_ylabel = "Relative SPL [dB"
+    mag_ylabel += "]"
+    
+    if args.AES17_SPL: 
+        print(f"The AES17 SPL convention will be used. \n")
+    
+    mic_cal_handler = None
+    if args.mic_cal_file is not None:
+        mic_cal_handler = MicCalibrationHandler(args.mic_cal_file)
+        print(f"Using the microphone calibration data from {args.mic_cal_file}.\n")
+
+    if args.smoothing > 48 or args.smoothing < 1:
+        args.smoothing = 24
+    print(f"The data will be calculated using {args.smoothing} points per octave.\n")
+    
+    # Check and enforce that the output filename includes the frd extension
+    my_string = args.output
+    # strip any trailing whitespaces
+    my_string = my_string.rstrip()
+    # Check if it ends with the FRD extension, if not, append it
+    if not my_string.endswith(".frd"):
+        my_string += ".frd"
+        args.output = my_string
+
+    # State variables setup using argparse defaults to seed the GUI
     state = {
         'gate_idx': None,
         'selecting_gate': False,
@@ -526,86 +568,73 @@ def main():
         'min_phase_deg': None,
         'freq_line_plot': None,
         'showing_phase': False,
-        'using_min_phase': False,
-        'tukey_alpha': 0.25,
+        'using_min_phase': args.min_phase,
+        'tukey_alpha': args.tukey_alpha,
         'resolution': None,
-        'SPL_factor': None,
+        'SPL_factor': SPL_factor,
         'start_freq': measurement_start_freq,
         'end_freq': HF_window_startF
     }
     
-    total_duration_ms = (len(audio_data) / sample_rate) * 1000.0
-    print(f"Processing WAV: {args.input_wav}")
-    print(f"Sample Rate: {sample_rate} Hz | Total Duration: {total_duration_ms:.2f} ms")
-
-    time_axis = np.arange(len(audio_data)) / sample_rate
-
+    # =========================================================================
+    # HEADLESS / AUTOMATED MODE 
+    # =========================================================================
+    if args.end_gate_time is not None:
+        print(f"\n--- Running Automated Mode ---")
+        print(f"End Gate Time: {args.end_gate_time} ms")
+        print(f"Tukey Alpha: {args.tukey_alpha}")
+        print(f"Min Phase Output: {'Yes' if args.min_phase else 'No'}\n")
+        
+        gate_idx = int((args.end_gate_time / 1000.0) * sample_rate)
+        gate_idx = max(10, min(gate_idx, len(audio_data)))
+        
+        freqs, mag_db, phase_deg, min_phase_deg, delta_f = process_and_apply_corrections(
+            audio_data, sample_rate, gate_idx, args.tukey_alpha,
+            measurement_start_freq, HF_window_startF, args.smoothing,
+            SPL_factor, args.AES17_SPL, mic_cal_handler
+        )
+        
+        phase_to_save = min_phase_deg if args.min_phase else phase_deg
+        
+        print(f"The computed frequency domain data has a resolution of {delta_f:.3g} Hz")
+        if state['using_min_phase']:
+            print(f"Saving data to FRD file (minimum phase): ", end="")
+        else:
+            print(f"Saving data to FRD file: ", end="")
+        write_frd_file(output_filename, freqs, mag_db, phase_to_save)
+        print("Automated processing complete. Exiting.")
+        return  # Exits smoothly without opening the Matplotlib GUI
+    # =========================================================================
     
-    # Determine y-axis label for magnitude based on whether spl correction factor was supplied
-    if all(v > 0 for v in (v_in1_max, v_in2_max, amp_gain, mic_sens, distance, RMS_internal_level)) and args.mic_cal_file is not None:
-        mag_ylabel = f"SPL [dB re 20 uPa @ 2.83V/1m" 
-        # Calculate the SPL correction factor, Vdrive = RMS_internal_level * v_in1_max
-        SPL_factor = distance / ( 0.001 * mic_sens ) 
-        SPL_factor *= ( v_in2_max / v_in1_max )
-        SPL_factor *= 2.83
-        SPL_factor /= ( RMS_internal_level * v_in1_max * amp_gain )
-        SPL_factor *= 50000.0
-        state['SPL_factor'] = SPL_factor
-        print(f"The SPL conversion factor is {SPL_factor:.3e}\n")
-    else:
-        mag_ylabel = "Relative SPL [dB"
-    mag_ylabel += "]"
-
-    
-    # Initialize the microphone calibration handler
-    mic_cal_handler = None
-    if args.mic_cal_file is not None:
-        mic_cal_handler = MicCalibrationHandler(args.mic_cal_file)
-        print(f"Using the microphone calibration data from {args.mic_cal_file}.\n")
-
-    print(f"The data will be calculated using {args.smoothing} points per octave.\n")
-    
-    # Setup Figure and Subplots
     fig, (ax_time, ax_freq) = plt.subplots(2, 1, figsize=(10, 8.5))
     plt.subplots_adjust(bottom=0.23)
     
-    # 1. Plot Time Domain Data
     ax_time.plot(time_axis * 1000, audio_data, color='b', lw=1, label='IR')
     ax_time.set_title(f"Impulse Response: {wav_filename} (Time Domain)")
     ax_time.set_ylabel("Amplitude")
     ax_time.grid(True)
     ax_time.set_xlim(-0.1, 100.0)
     
-    # Initial gate line position set to the end of the data (Green)
     initial_gate_time_ms = 50.0
     initial_gate_idx = int( len(audio_data) * initial_gate_time_ms / total_duration_ms )
     gate_line = ax_time.axvline(x=initial_gate_time_ms, color='g', linestyle='--', lw=1.5, label='Window End')
     state['gate_idx'] = initial_gate_idx
     
-    # Plot Tukey window function as a red line initially scaled to 95% of current y max
     initial_win = scipy.signal.get_window(('tukey', state['tukey_alpha']), initial_gate_idx)
     ylim_initial = ax_time.get_ylim()
     initial_y_top = ylim_initial[1] if ylim_initial[1] != 0 else 1.0
     window_line, = ax_time.plot(time_axis[:initial_gate_idx] * 1000, initial_win * (0.95 * initial_y_top), color='r', lw=1.5, label='Tukey Window')
     
-    ax_time.legend(loc='lower right',
-        framealpha=1.0,  # Makes the background fully opaque (1.0) instead of semi-transparent
-        facecolor='white',  # Sets the background color of the legend box explicitly
-        edgecolor='black',  # Sets the border color of the legend box
-    )
+    ax_time.legend(loc='lower right', framealpha=1.0, facecolor='white', edgecolor='black')
     
-    # 2. Configure Frequency Domain Plot with automatic scaling and gridlines
     ax_freq.set_title("Frequency Domain Data")
     ax_freq.set_xlabel("Frequency (Hz)")
     ax_freq.set_ylabel(mag_ylabel)
     ax_freq.set_xscale('log')
-    ax_freq.set_xlim(20, sample_rate / 2.0)
+    ax_freq.set_xlim(10, sample_rate / 2.0)
     ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
-    
-    # Configure X-axis minor and major gridlines for log scale
     ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
     
-    # Define Button Axes [left, bottom, width, height] - Evenly distributed, height set to 0.05
     btn_y = 0.03
     btn_h = 0.04
     
@@ -621,24 +650,15 @@ def main():
     btn_min  = Button(ax_btn_min, 'Toggle Phase-MinPhase', color='aliceblue', hovercolor='palegreen')
     btn_save_exit = Button(ax_btn_save_exit, 'Save & Exit', color='aliceblue', hovercolor='palegreen')
     
-    # Define Tukey Alpha Text Box Axes above Place Gate & Compute buttons
     ax_box_tukey = plt.axes([0.21, 0.10, 0.06, 0.03])
     textbox_tukey = TextBox(ax_box_tukey, 'TUKEY WINDOW WIDTH:  ', initial=str(state['tukey_alpha']),textalignment='center')
 
-    #Create text box to display the current phase type
-    # Adjust coordinates [left, bottom, width, height] to place it just above toggle Phase-Minphase button
     ax_box_phase_type = plt.axes([0.66, 0.10, 0.13, 0.03])
-    # The label argument automatically places "PHASE TYPE:" to the left of the box
     initial_text = 'minimum phase' if state['using_min_phase'] else 'regular phase'
-    phase_textbox = TextBox(
-        ax_box_phase_type, 'PHASE TYPE:  ', initial=initial_text, textalignment='center'
-    )
-    # Disable user editing since this is purely a status indicator
+    phase_textbox = TextBox(ax_box_phase_type, 'PHASE TYPE:  ', initial=initial_text, textalignment='center')
     phase_textbox.set_active(False)
 
-
     def update_tukey_visual(event=None):
-        """Redraws the Tukey window line to stay within view and reach 95% of y-axis max."""
         ylim = ax_time.get_ylim()
         y_top = ylim[1]
         win = scipy.signal.get_window(('tukey', state['tukey_alpha']), state['gate_idx'])
@@ -665,7 +685,6 @@ def main():
 
     textbox_tukey.on_submit(submit_tukey_alpha)
 
-    # Event Handlers & Button Callbacks
     def on_click_time_plot(event):
         if state['selecting_gate'] and event.inaxes == ax_time:
             clicked_time_ms = event.xdata
@@ -699,7 +718,6 @@ def main():
         
     def handle_calc_button(event):
         if state['freq_line_plot'] is not None:
-            # Clear lower plot
             for artist in state['freq_line_plot']:
                 artist.remove()
             state['freq_line_plot'] = None
@@ -709,7 +727,7 @@ def main():
             ax_freq.set_title("Frequency Domain Data (Cleared)")
             ax_freq.set_xlabel(f'Frequency (Hz)')
             fig.canvas.draw_idle()
-            # Clear calculated data
+            
             state['freqs'] = None
             state['mag_db'] = None
             state['phase_deg'] = None
@@ -717,53 +735,18 @@ def main():
             state['resolution'] = None
             print("Lower plot cleared. All calculated data cleared.")
         else:
-            # Compute and plot frequency domain data
-            freqs, mag_db, phase_deg, min_phase_deg, delta_f = compute_frequency_response(
-                audio_data, 
-                sample_rate, 
-                state['gate_idx'], 
-                state['tukey_alpha'],
-                state['start_freq'], 
-                state['end_freq'],
-                args.smoothing 
+            # Reusing the shared mathematical helper function
+            freqs, mag_db, phase_deg, min_phase_deg, delta_f = process_and_apply_corrections(
+                audio_data, sample_rate, state['gate_idx'], state['tukey_alpha'],
+                state['start_freq'], state['end_freq'], args.smoothing,
+                state['SPL_factor'], args. AES17_SPL, mic_cal_handler
             )
 
-
-            # Create a boolean mask where True means the frequency is VALID
-            # Lower limit: delta_f (resolution)
-            # Upper limit: state['end_freq']
-            valid_mask = (freqs >= delta_f) & (freqs <= state['end_freq'])
-
-            # Apply np.nan in place to all indices where the mask is False
-            mag_db[~valid_mask] = np.nan
-            phase_deg[~valid_mask] = np.nan
-            min_phase_deg[~valid_mask] = np.nan
-
             state['freqs'] = freqs
+            state['mag_db'] = mag_db
             state['phase_deg'] = phase_deg
             state['min_phase_deg'] = min_phase_deg
             state['resolution'] = delta_f
-
-            # Apply SPL corrections: ==============================================
-            # Convert the SPL correction factor into a decibel offset
-            if state['SPL_factor'] is not None and state['SPL_factor'] > 0:
-                spl_offset_db = 20 * np.log10(state['SPL_factor'])
-            else:
-                spl_offset_db = 0.0
-
-            # Apply the system SPL correction factor
-            mag_db += spl_offset_db
-            
-            # 2. Apply the microphone calibration corrections using the pre-loaded handler
-            if mic_cal_handler is not None and mic_cal_handler.is_valid:
-                cal_corrections = mic_cal_handler.get_corrections(freqs)
-                mag_db -= np.asarray(cal_corrections, dtype=float)
-                
-            # Update the dictionary with the fully calibrated magnitude data
-            state['mag_db'] = mag_db
-            
-            # Done applying SPL corections ========================================
-
             
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -780,19 +763,28 @@ def main():
                 line, = ax_freq.plot(freqs, current_phase, color='g', lw=1.2)
                 ax_freq.set_ylabel("Phase (degrees)")
                 ax_freq.set_title(title_label)
+                ax_freq.set_ylim(-180,180)
+                ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(60))
+                ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(30))
             else:
                 line, = ax_freq.plot(freqs, mag_db, color='r', lw=1.2)
                 ax_freq.set_ylabel(mag_ylabel)
                 ax_freq.set_title("Frequency Domain Data - Magnitude")
+                mag_data_for_scaling = mag_db
+                valid_mag = mag_data_for_scaling[~np.isnan(mag_data_for_scaling)]
+                data_max = np.max(valid_mag) if len(valid_mag) > 0 else 0.0
+                y_max = np.ceil(data_max / 5.0) * 5.0
+                y_min = y_max - 50.0
+                ax_freq.set_ylim(y_min, y_max)
+                ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(10))
+                ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(5))
             
-            ax_freq.set_xlabel(f'Frequency (Hz) at {state['resolution']:.3g} Hz resolution')
+            ax_freq.set_xlabel(f"Frequency (Hz) at {state['resolution']:.3g} Hz resolution")
             state['freq_line_plot'] = [line]
             fig.canvas.draw_idle()
             
-            # Construct formatted completion message based on command-line arguments
             print(f"The computed frequency domain data has a resolution of {delta_f:.3g} Hz")
 
-            # Print information about the frequency magnitude values
             SPL_info_text = "SPL units for computed frequency response = "
             if state['SPL_factor'] is not None and mic_cal_handler is not None:
               SPL_info_text += "dB re 20 uPa @ 2.83V/1m" 
@@ -800,17 +792,18 @@ def main():
               SPL_info_text += "Relative SPL Level in dB"
             print(f"{SPL_info_text}")
 
-
     def handle_view_button(event):
         if state['freqs'] is not None:
             state['showing_phase'] = not state['showing_phase']
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
             ax_freq.set_xscale('log')
-            highest_power_of_10 = 10 ** power
+            highest_power_of_10 = 10 ** np.floor(np.log10(state['resolution']))
             ax_freq.set_xlim(highest_power_of_10, sample_rate / 2.0)
-            
             ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
+            ax_freq.set_ylim(-180,180)
+            ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(60))
+            ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(30))
             
             if state['showing_phase']:
                 current_phase = state['min_phase_deg'] if state['using_min_phase'] else state['phase_deg']
@@ -822,48 +815,52 @@ def main():
                 line, = ax_freq.plot(state['freqs'], state['mag_db'], color='r', lw=1.2)
                 ax_freq.set_ylabel(mag_ylabel)
                 ax_freq.set_title("Frequency Domain Data - Magnitude")
+                mag_data_for_scaling = state['mag_db']
+                valid_mag = mag_data_for_scaling[~np.isnan(mag_data_for_scaling)]
+                data_max = np.max(valid_mag) if len(valid_mag) > 0 else 0.0
+                y_max = np.ceil(data_max / 5.0) * 5.0
+                y_min = y_max - 50.0
+                ax_freq.set_ylim(y_min, y_max)
+                ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(10))
+                ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(5))
                 
-            ax_freq.set_xlabel(f'Frequency (Hz) at {state['resolution']:.3g} Hz resolution')
+            ax_freq.set_xlabel(f"Frequency (Hz) at {state['resolution']:.3g} Hz resolution")
             state['freq_line_plot'] = [line]
             fig.canvas.draw_idle()
             print(f"Toggled view to {'Phase (' + ('MinPhase' if state['using_min_phase'] else 'Standard') + ')' if state['showing_phase'] else 'Magnitude'}.")
-            # Update the text box that shows which phase type is active
             update_phase_indicator()
         else:
             print("No frequency data computed yet. Click 'Compute/Clear' first.")
 
-
     def update_phase_indicator():
-      """Call this function inside your toggle button callback
-      whenever `using_min_phase` changes state.  """
       new_text = 'minimum phase' if state['using_min_phase'] else 'regular phase'
       phase_textbox.set_val(new_text)
 
-
     def handle_min_phase_button(event):
         state['using_min_phase'] = not state['using_min_phase']
-        # Update the text box showing the phase type
         update_phase_indicator()
         if state['using_min_phase']:
             print("MinPhase enabled.")
         else:
             print("MinPhase disabled.")
         
-        # Refresh lower plot if showing phase currently
         if state['freqs'] is not None and state['showing_phase']:
             ax_freq.clear()
             ax_freq.grid(True, which='both', linestyle='--', linewidth=0.5)
             ax_freq.set_xscale('log')
-            ax_freq.set_xlim(20, sample_rate / 2.0)
-            
+            highest_power_of_10 = 10 ** np.floor(np.log10(state['resolution']))
+            ax_freq.set_xlim(highest_power_of_10, sample_rate / 2.0)
             ax_freq.xaxis.set_minor_locator(LogLocator(base=10.0, subs='auto', numticks=10))
+            ax_freq.set_ylim(-180,180)
+            ax_freq.yaxis.set_major_locator(ticker.MultipleLocator(60))
+            ax_freq.yaxis.set_minor_locator(ticker.MultipleLocator(30))
             
             current_phase = state['min_phase_deg'] if state['using_min_phase'] else state['phase_deg']
             title_label = "Frequency Domain Data - Minimum Phase" if state['using_min_phase'] else "Frequency Domain Data - Phase"
             line, = ax_freq.plot(state['freqs'], current_phase, color='g', lw=1.2)
             ax_freq.set_ylabel("Phase (degrees)")
             ax_freq.set_title(title_label)
-            ax_freq.set_xlabel(f'Frequency (Hz) at {state['resolution']:.3g} Hz resolution')
+            ax_freq.set_xlabel(f"Frequency (Hz) at {state['resolution']:.3g} Hz resolution")
             state['freq_line_plot'] = [line]
             fig.canvas.draw_idle()
 
@@ -873,40 +870,34 @@ def main():
             return
         phase_to_save = state['min_phase_deg'] if state['using_min_phase'] else state['phase_deg']
         if state['using_min_phase']:
-            print(f"Saving FRD data files (minimum phase response)...")
+            print(f"Saving data to FRD file (minimum phase): ", end="")
         else:
-            print(f"Saving FRD data files...")
+            print(f"Saving data to FRD file: ", end="")
         write_frd_file(output_filename, state['freqs'], state['mag_db'], phase_to_save)
         
         print("Closing application.")
         plt.close('all')
         sys.exit(0)
 
-    # Connect buttons to handlers
     btn_gate.on_clicked(handle_gate_button)
     btn_calc.on_clicked(handle_calc_button)
     btn_view.on_clicked(handle_view_button)
     btn_min.on_clicked(handle_min_phase_button)
     btn_save_exit.on_clicked(handle_save_exit_button)
     
-    # Access the toolbar via the canvas manager
     toolbar = fig.canvas.manager.toolbar if hasattr(fig.canvas, 'manager') and fig.canvas.manager else None
 
     if toolbar is not None:
-        # For Qt Backends (PyQt / PySide)
         if hasattr(toolbar, 'actions'):
             for action in toolbar.actions():
                 text = action.text().lower()
                 tooltip = action.toolTip().lower()
                 if 'home' in text or 'reset' in text or 'home' in tooltip or 'reset' in tooltip:
                     toolbar.removeAction(action)
-                    
-        # For Tkinter (TkAgg) Backend
         elif hasattr(toolbar, '_buttons'):
             if 'Home' in toolbar._buttons:
-                toolbar._buttons['Home'].pack_forget() # Hide the home button widget
+                toolbar._buttons['Home'].pack_forget()
 
-    # Trigger default zoom tool if desired
     if toolbar is not None:
         toolbar.zoom()
 

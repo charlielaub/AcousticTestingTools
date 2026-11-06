@@ -9,6 +9,18 @@ from tkinter import ttk, filedialog
 from tkinter import colorchooser
 
 
+# --- CONFIGURATION of TITLE and AXIS LABEL text ---
+# FONT FAMILY NAMES: DejaVu Sans, Arial, Liberation Sans, Verdana, Tahoma, 
+#   Times New Roman, DejaVu Serif, Liberation Serif, Courier New, 
+#   DejaVu Sans Mono, Liberation Mono
+TITLE_FONT_SIZE = 15
+TITLE_FONT_WEIGHT = 'bold'
+TITLE_FONT_FAMILY = 'Verdana'  # Or 'DejaVu Sans', 'Helvetica', etc.
+TITLE_TO_PLOT_GAP = 15  #controls the width of the gap between title and plot
+LABEL_FONT_SIZE = 12
+LABEL_FONT_WEIGHT = 'normal'
+LABEL_FONT_FAMILY = 'DejaVu Sans'  # Or 'DejaVu Sans', 'Helvetica', etc.
+
 
 def parse_frd_file(filepath):
     """
@@ -289,18 +301,6 @@ def setup_dynamic_y_ticks(fig, ax):
 
 
 def main():
-    # --- CONFIGURATION of TITLE and AXIS LABEL text ---
-    # FONT FAMILY NAMES: DejaVu Sans, Arial, Liberation Sans, Verdana, Tahoma, 
-    #   Times New Roman, DejaVu Serif, Liberation Serif, Courier New, 
-    #   DejaVu Sans Mono, Liberation Mono
-    TITLE_FONT_SIZE = 15
-    TITLE_FONT_WEIGHT = 'bold'
-    TITLE_FONT_FAMILY = 'Verdana'  # Or 'DejaVu Sans', 'Helvetica', etc.
-    TITLE_TO_PLOT_GAP = 15  #controls the width of the gap between title and plot
-    LABEL_FONT_SIZE = 12
-    LABEL_FONT_WEIGHT = 'normal'
-    LABEL_FONT_FAMILY = 'DejaVu Sans'  # Or 'DejaVu Sans', 'Helvetica', etc.
-
     if len(sys.argv) < 2:
         print("Usage: python plot_frd_interactive.py <file1.frd> [file2.frd ...]")
         sys.exit(1)
