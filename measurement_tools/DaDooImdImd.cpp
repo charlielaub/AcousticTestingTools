@@ -1,9 +1,3 @@
-
-
-
-
-
-
 /* ========================================================================== */
 /*                                                                            */
 /*   DaDooImdImd.cpp                                                          */
@@ -465,16 +459,39 @@ int main(int argc, char* argv[]) {
     };
 
     PaStreamParameters inParams{}, outParams{};
+    
+    // --- INPUT SETUP ---
     inParams.device = args.input_device_idx;
     inParams.channelCount = pa_in_channels;
     inParams.sampleFormat = paFloat32;
+    
+    // Request safe ALSA buffer geometry
+    const PaDeviceInfo* inDeviceInfo = Pa_GetDeviceInfo(inParams.device);
+    if (inDeviceInfo) {
+        inParams.suggestedLatency = inDeviceInfo->defaultHighInputLatency;
+    } else {
+        inParams.suggestedLatency = 0.1; // 100ms fallback
+    }
+
+    // --- OUTPUT SETUP ---
     outParams.device = args.output_device_idx;
     outParams.channelCount = pa_out_channels;
     outParams.sampleFormat = paFloat32;
+    
+    // Request safe ALSA buffer geometry
+    const PaDeviceInfo* outDeviceInfo = Pa_GetDeviceInfo(outParams.device);
+    if (outDeviceInfo) {
+        outParams.suggestedLatency = outDeviceInfo->defaultHighOutputLatency;
+    } else {
+        outParams.suggestedLatency = 0.1; // 100ms fallback
+    }
+
+    // Explicitly define a safe buffer size rather than leaving it up to ALSA
+    unsigned long framesPerBuffer = 2048; 
 
     PaStream* stream = nullptr;
     PaError err = Pa_OpenStream(&stream, &inParams, &outParams, args.sample_rate, 
-                                paFramesPerBufferUnspecified, paNoFlag, measurementCallback, &ctx);
+                                framesPerBuffer, paNoFlag, measurementCallback, &ctx);
     if (err != paNoError) return -1;
 
     // 3. Collect Data

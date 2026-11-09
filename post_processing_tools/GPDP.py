@@ -233,7 +233,7 @@ def main():
         NOTE: All input and output files should be in the FRD file format.
          ''')
     )
-    parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument("--no_plot", action="store_true")
     args = parser.parse_args()
 
     try:

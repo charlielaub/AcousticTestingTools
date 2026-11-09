@@ -4,6 +4,7 @@ import scipy.signal as signal
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 from matplotlib.colors import Normalize
+import argparse
 
 class WaterfallAnalyzer:
     def __init__(self, filepath, config):
@@ -146,15 +147,15 @@ class WaterfallAnalyzer:
         self.draw_plots()
         
         axcolor = 'lightgoldenrodyellow'
-        ax_dyn = plt.axes([0.1, 0.15, 0.35, 0.03], facecolor=axcolor)
-        ax_time = plt.axes([0.1, 0.1, 0.35, 0.03], facecolor=axcolor)
-        ax_per = plt.axes([0.1, 0.05, 0.35, 0.03], facecolor=axcolor)
+        ax_dyn = plt.axes([0.2, 0.15, 0.30, 0.03], facecolor=axcolor)
+        ax_time = plt.axes([0.2, 0.1, 0.30, 0.03], facecolor=axcolor)
+        ax_per = plt.axes([0.2, 0.05, 0.30, 0.03], facecolor=axcolor)
         
         self.sl_dyn = Slider(ax_dyn, 'Dynamic Range (dB)', 10, 60, valinit=self.config['dynamic_range'], valstep=1)
         self.sl_time = Slider(ax_time, 'CSD Time (ms)', 2, 100, valinit=self.config['time_span_ms'], valstep=1)
         self.sl_per = Slider(ax_per, 'PCSD Periods', 5, 50, valinit=self.config['period_span'], valstep=1)
         
-        ax_btn = plt.axes([0.6, 0.08, 0.15, 0.06])
+        ax_btn = plt.axes([0.7, 0.08, 0.15, 0.06])
         self.btn_toggle = Button(ax_btn, 'Toggle 2D/3D View')
         
         self.sl_dyn.on_changed(self.update_limits)
@@ -290,8 +291,15 @@ class WaterfallAnalyzer:
 # ==========================================
 if __name__ == '__main__':
     
+    # COMMAND LINE ARGUMENT PARSING FOR DATA FILE
+    parser = argparse.ArgumentParser(description="Plot Cumulative Spectral Decay CSD and PCSD in wireframe and heatmap formats.")
+    parser.add_argument("filename", type=str, help="File path-name to the WAV data produced by Time2Freq (via the --time_outfile option).")
+
+    # Use parse_known_args() so it doesn't crash if run inside interactive environments like Jupyter/IPython
+    args, unknown = parser.parse_known_args()
+
     # EDIT THIS TO YOUR FARINA WAV FILE PATH
-    WAV_FILE = "Fimpulse.wav" 
+    WAV_FILE = args.filename 
     
     config = {
         'left_window_ms': 2.0,   
