@@ -1672,7 +1672,7 @@ int main(int argc, char* argv[]) {
     //Save stimulus data as WAV file
     filetype_extension = "_s";
     filename = args.basefilename + filetype_extension + ".wav";
-    if (write_wav_file_plus_info(args, filename, chirp)) {
+    if (write_wav_file_plus_info(args, filename, averaged_ref)) {
         std::cout << "Stimulus WAV file and custom xDAT metadata written to the file " << filename << "\n";
     } else {
         std::cerr << "Failure: An error occurred while attempting to write the stimulus WAV file.\n";
